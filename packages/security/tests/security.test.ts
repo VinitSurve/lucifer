@@ -109,11 +109,134 @@ describe('SecretRedactor', () => {
     expect(redacted).toContain('[REDACTED_GEMINI_KEY]');
   });
 
+  it('redacts Groq API keys', () => {
+    const raw = 'Key is gsk_abcdef1234567890abcdef1234567890';
+    const redacted = SecretRedactor.redact(raw);
+    expect(redacted).not.toContain('gsk_abcdef');
+    expect(redacted).toContain('[REDACTED_GROQ_KEY]');
+  });
+
+  it('redacts OpenAI and OpenRouter keys', () => {
+    const raw = 'Key is sk-abcdef1234567890abcdef1234567890abcdef';
+    const redacted = SecretRedactor.redact(raw);
+    expect(redacted).not.toContain('sk-abcdef');
+    expect(redacted).toContain('[REDACTED_AI_KEY]');
+  });
+
   it('redacts GitHub personal access tokens', () => {
     const raw = 'GitHub token ghp_1234567890abcdefghijklmnopqrstuvwxyzAB';
     const redacted = SecretRedactor.redact(raw);
     expect(redacted).not.toContain('ghp_1234');
     expect(redacted).toContain('[REDACTED_GITHUB_TOKEN]');
+  });
+
+  it('redacts Bearer authorization tokens', () => {
+    const raw = 'Header: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.xyz';
+    const redacted = SecretRedactor.redact(raw);
+    expect(redacted).not.toContain('eyJhbGci');
+    expect(redacted).toContain('Bearer [REDACTED_AUTH_TOKEN]');
+  });
+
+  it('redacts database URLs with embedded passwords', () => {
+    const raw = 'Connect to postgres://app_user:secret_password@db.internal.net:5432/production';
+    const redacted = SecretRedactor.redact(raw);
+    expect(redacted).not.toContain('secret_password');
+    expect(redacted).toBe('Connect to postgres://app_user:[REDACTED_DB_PASSWORD]@db.internal.net:5432/production');
+  });
+
+  // P47-SEC-01: PEM Private Key Tests
+  it('redacts multiline RSA private key blocks', () => {
+    const raw = `Here is my RSA key:
+-----BEGIN RSA PRIVATE KEY-----
+MIIEowIBAAKCAQEA0Y123456789abcdefghijklmnopqrstuvwxyz
+ABCDEF1234567890==
+-----END RSA PRIVATE KEY-----
+Please keep it safe.`;
+    const redacted = SecretRedactor.redact(raw);
+    expect(redacted).not.toContain('MIIEowIBAAKCAQEA0');
+    expect(redacted).toContain('Here is my RSA key:\n[REDACTED_PRIVATE_KEY]\nPlease keep it safe.');
+  });
+
+  it('redacts EC private key blocks', () => {
+    const raw = `-----BEGIN EC PRIVATE KEY-----
+MHcCAQEEII1234567890abcdefghijklmnopqrstuvwxyz
+-----END EC PRIVATE KEY-----`;
+    const redacted = SecretRedactor.redact(raw);
+    expect(redacted).not.toContain('MHcCAQEEII');
+    expect(redacted).toBe('[REDACTED_PRIVATE_KEY]');
+  });
+
+  it('redacts generic and OpenSSH private key blocks', () => {
+    const generic = `-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC7
+-----END PRIVATE KEY-----`;
+    const openssh = `-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB
+-----END OPENSSH PRIVATE KEY-----`;
+
+    expect(SecretRedactor.redact(generic)).toBe('[REDACTED_PRIVATE_KEY]');
+    expect(SecretRedactor.redact(openssh)).toBe('[REDACTED_PRIVATE_KEY]');
+  });
+
+  it('redacts multiple PEM blocks in a single text', () => {
+    const raw = `Key 1:
+-----BEGIN RSA PRIVATE KEY-----
+AAAAB3NzaC1yc2EAAAADAQABAAABAQC
+-----END RSA PRIVATE KEY-----
+and Key 2:
+-----BEGIN EC PRIVATE KEY-----
+MHcCAQEEII1234567890abcdef
+-----END EC PRIVATE KEY-----`;
+    const redacted = SecretRedactor.redact(raw);
+    expect(redacted).not.toContain('AAAAB3Nza');
+    expect(redacted).not.toContain('MHcCAQEEII');
+    expect(redacted).toContain('Key 1:\n[REDACTED_PRIVATE_KEY]\nand Key 2:\n[REDACTED_PRIVATE_KEY]');
+  });
+
+  // P47-SEC-01: Credential URL Tests
+  it('redacts HTTPS and HTTP URLs containing embedded credentials', () => {
+    const httpsRaw = 'Service URL: https://admin:super_secret_pass@example.com/api/v1?token=test';
+    const httpRaw = 'Local URL: http://dev_user:p@ssword!@localhost:8080/dashboard';
+
+    const redactedHttps = SecretRedactor.redact(httpsRaw);
+    expect(redactedHttps).not.toContain('admin:super_secret_pass');
+    expect(redactedHttps).toBe('Service URL: https://[REDACTED_CREDENTIALS]@example.com/api/v1?token=test');
+
+    const redactedHttp = SecretRedactor.redact(httpRaw);
+    expect(redactedHttp).not.toContain('dev_user:p@ssword!');
+    expect(redactedHttp).toBe('Local URL: http://[REDACTED_CREDENTIALS]@localhost:8080/dashboard');
+  });
+
+  it('redacts URLs with URL-encoded credential characters', () => {
+    const raw = 'URL is https://user%40company.com:p%40ss%3Aword%21@api.cloud.com:443/v2/items';
+    const redacted = SecretRedactor.redact(raw);
+    expect(redacted).not.toContain('user%40company.com');
+    expect(redacted).not.toContain('p%40ss%3Aword%21');
+    expect(redacted).toBe('URL is https://[REDACTED_CREDENTIALS]@api.cloud.com:443/v2/items');
+  });
+
+  it('handles surrounding punctuation and parentheses on credential URLs', () => {
+    const inParens = '(https://admin:secret123@example.com/api)';
+    const withPeriod = 'Visit https://user:pass@example.com/api.';
+
+    const redParens = SecretRedactor.redact(inParens);
+    expect(redParens).not.toContain('admin:secret123');
+    expect(redParens).toContain('https://[REDACTED_CREDENTIALS]@example.com/api');
+
+    const redPeriod = SecretRedactor.redact(withPeriod);
+    expect(redPeriod).not.toContain('user:pass');
+    expect(redPeriod).toContain('https://[REDACTED_CREDENTIALS]@example.com/api');
+  });
+
+  it('preserves URLs without credentials and avoids false positives', () => {
+    const normalUrl = 'Documentation at https://docs.example.com/v1/auth?client_id=123';
+    expect(SecretRedactor.redact(normalUrl)).toBe(normalUrl);
+
+    const emailAddress = 'Contact support@example.com for help';
+    expect(SecretRedactor.redact(emailAddress)).toBe(emailAddress);
+
+    const atInPath = 'Visit https://github.com/@username/repo';
+    expect(SecretRedactor.redact(atInPath)).toBe(atInPath);
   });
 });
 
