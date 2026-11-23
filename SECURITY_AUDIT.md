@@ -81,9 +81,10 @@ This security audit was conducted by inspecting the source code and testing atta
 | Constant-Time Webhook Secret | `packages/security/src/telegram-auth.ts` | **ACTIVE & VERIFIED** |
 | SSRF Guard | `packages/security/src/ssrf-filter.ts` | **ACTIVE & VERIFIED** |
 | Prompt Injection Boundary | `packages/security/src/prompt-injection.ts` | **ACTIVE & VERIFIED** |
-| Secret Redaction | `packages/security/src/secret-redactor.ts` & `apps/cloud/src/telegram/client.ts` | **ACTIVE & VERIFIED (REMEDIATED)** |
-| Rate Limiting | `packages/security/src/rate-limiter.ts` & `apps/cloud/src/index.ts` | **ACTIVE & VERIFIED (REMEDIATED)** |
-| Local Path Traversal Protection | `apps/local-agent/src/lucifer_agent/executor.py` | **ACTIVE & VERIFIED** |
-| Local Command Allowlist | `apps/local-agent/src/lucifer_agent/executor.py` | **HARDENED & VERIFIED (REMEDIATED - `python3` removed)** |
-| Local Agent Endpoint Auth | `apps/cloud/src/index.ts` & `packages/security/src/device-auth.ts` | **ACTIVE & VERIFIED (REMEDIATED - 401 & 403 enforced)** |
-| Telegram Update Deduplication | `apps/cloud/migrations/0002_security_remediation.sql` & `apps/cloud/src/index.ts` | **ACTIVE & VERIFIED (REMEDIATED - atomic D1 PK)** |
+| Secret Redaction | `packages/security/src/secret-redactor.ts`, `apps/cloud/src/telegram/client.ts`, `apps/cloud/src/db/repository.ts` | **ACTIVE & VERIFIED (PHASE 2 HARDENED: Expanded formats, pre-persistence D1 sanitization)** |
+| Rate Limiting | `packages/security/src/rate-limiter.ts` & `apps/cloud/src/index.ts` | **ACTIVE & VERIFIED (PHASE 2 HARDENED: Bounded maxKeys, LRU eviction, pairing IP limiter)** |
+| Local Path Traversal Protection | `apps/local-agent/src/lucifer_agent/executor.py` | **ACTIVE & VERIFIED (Symlink escape prevention)** |
+| Local Execution Architecture | `apps/local-agent/src/lucifer_agent/executor.py` | **PURGED & HARDENED (PHASE 2: Host interpreters/npm/pytest removed; capability inspection only; Docker isolation)** |
+| Local Agent Endpoint Auth & Pairing | `apps/cloud/src/index.ts` & `packages/security/src/device-auth.ts` | **ACTIVE & VERIFIED (PHASE 2: Anti-hijacking 409, rotation/revocation, IP rate limit, no webhook fallback)** |
+| Telegram Update Deduplication | `apps/cloud/migrations/0003_phase2_security_hardening.sql` & `apps/cloud/src/index.ts` | **ACTIVE & VERIFIED (PHASE 2: Durable state machine PROCESSING -> COMPLETED/FAILED)** |
+| Task Lease Expiry Reaper | `apps/cloud/src/db/repository.ts` | **ACTIVE & VERIFIED (PHASE 2: Auto-reclaim expired RUNNING tasks, unexpired 403 enforcement)** |
