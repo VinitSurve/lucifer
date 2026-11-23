@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { LuciferDbRepository } from '../src/db/repository';
 import { TaskRecord } from '@lucifer/shared-types';
+import { ToolPermissionGuard } from '@lucifer/tool-contracts';
 
 class RealSqliteD1PreparedStatement {
   private db: DatabaseSync;
@@ -209,5 +210,58 @@ describe('Real SQLite Engine — D1 Migrations and Schema Validation', () => {
     // Second consumption must fail (single-use constraint)
     const secondConsume = await repo.consumePairingCode('pair_code_abc_123');
     expect(secondConsume.valid).toBe(false);
+  });
+
+  it('Scenario D: verifies P47-CFG-01 secure Tier 1 defaults and settings lifecycle', async () => {
+    const sqlite = new DatabaseSync(':memory:');
+    sqlite.exec(mig1Sql);
+    sqlite.exec(mig2Sql);
+    sqlite.exec(mig3Sql);
+
+    const d1Adapter = new RealSqliteD1Database(sqlite);
+    const repo = new LuciferDbRepository(d1Adapter as any);
+
+    // 1. Fresh database schema default for auto_approve_tier1 is 0
+    const schemaInfo = sqlite.prepare('PRAGMA table_info(user_settings)').all() as any[];
+    const tier1Col = schemaInfo.find((col) => col.name === 'auto_approve_tier1');
+    expect(tier1Col).toBeDefined();
+    expect(String(tier1Col.dflt_value)).toBe('0');
+
+    // 2. New user creation records default to auto_approve_tier1 = 0
+    const userA = await repo.getOrCreateUser('111222', 'alice');
+    const autoApproveA = await repo.getUserTier1AutoApprove(userA.id);
+    expect(autoApproveA).toBe(false);
+
+    // 3. Approval behavior reflects disabled Tier 1 (requires confirmation)
+    const permA = ToolPermissionGuard.evaluate('TIER_1_LOW_RISK', autoApproveA);
+    expect(permA.requiresApproval).toBe(true);
+
+    // 4. Missing/non-existent user settings fails closed to secure default false
+    const missingAutoApprove = await repo.getUserTier1AutoApprove('usr_non_existent');
+    expect(missingAutoApprove).toBe(false);
+    const permMissing = ToolPermissionGuard.evaluate('TIER_1_LOW_RISK', missingAutoApprove);
+    expect(permMissing.requiresApproval).toBe(true);
+
+    // 5. Existing user with explicit auto_approve_tier1 = 1 is preserved and not overwritten
+    sqlite.exec("INSERT INTO users (id, telegram_id, username, created_at) VALUES ('usr_bob', '333444', 'bob', 1700000000)");
+    sqlite.exec("INSERT INTO user_settings (user_id, timezone, budget_mode, auto_approve_tier1, created_at, updated_at) VALUES ('usr_bob', 'UTC', 'FREE_ONLY', 1, 1700000000, 1700000000)");
+
+    const autoApproveBob = await repo.getUserTier1AutoApprove('usr_bob');
+    expect(autoApproveBob).toBe(true);
+    const permBob = ToolPermissionGuard.evaluate('TIER_1_LOW_RISK', autoApproveBob);
+    expect(permBob.requiresApproval).toBe(false);
+
+    // 6. User settings with explicit 0 remains 0
+    sqlite.exec("INSERT INTO users (id, telegram_id, username, created_at) VALUES ('usr_charlie', '555666', 'charlie', 1700000000)");
+    sqlite.exec("INSERT INTO user_settings (user_id, timezone, budget_mode, auto_approve_tier1, created_at, updated_at) VALUES ('usr_charlie', 'UTC', 'FREE_ONLY', 0, 1700000000, 1700000000)");
+
+    const autoApproveCharlie = await repo.getUserTier1AutoApprove('usr_charlie');
+    expect(autoApproveCharlie).toBe(false);
+
+    // 7. Corrupted/null setting fails securely
+    sqlite.exec("INSERT INTO users (id, telegram_id, username, created_at) VALUES ('usr_null', '777888', 'nulluser', 1700000000)");
+    sqlite.exec("INSERT INTO user_settings (user_id, timezone, budget_mode, auto_approve_tier1, created_at, updated_at) VALUES ('usr_null', 'UTC', 'FREE_ONLY', NULL, 1700000000, 1700000000)");
+    const autoApproveNull = await repo.getUserTier1AutoApprove('usr_null');
+    expect(autoApproveNull).toBe(false);
   });
 });

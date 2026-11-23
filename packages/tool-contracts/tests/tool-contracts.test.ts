@@ -58,6 +58,30 @@ describe('ToolPermissionGuard', () => {
     expect(res.allowed).toBe(false);
     expect(res.requiresApproval).toBe(true);
   });
+
+  it('defaults to requiring approval for Tier 1 when auto-approve is omitted or false', () => {
+    // Default call with no second arg
+    const resDefault = ToolPermissionGuard.evaluate('TIER_1_LOW_RISK');
+    expect(resDefault.allowed).toBe(true);
+    expect(resDefault.requiresApproval).toBe(true);
+
+    // Explicit false
+    const resFalse = ToolPermissionGuard.evaluate('TIER_1_LOW_RISK', false);
+    expect(resFalse.allowed).toBe(true);
+    expect(resFalse.requiresApproval).toBe(true);
+  });
+
+  it('allows autonomous Tier 1 execution only when explicitly configured to true', () => {
+    const resTrue = ToolPermissionGuard.evaluate('TIER_1_LOW_RISK', true);
+    expect(resTrue.allowed).toBe(true);
+    expect(resTrue.requiresApproval).toBe(false);
+  });
+
+  it('fails closed to strict approval on unknown risk tier', () => {
+    const resUnknown = ToolPermissionGuard.evaluate('UNKNOWN_TIER' as any);
+    expect(resUnknown.allowed).toBe(false);
+    expect(resUnknown.requiresApproval).toBe(true);
+  });
 });
 
 describe('ToolLoopGuard', () => {

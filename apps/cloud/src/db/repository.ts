@@ -27,10 +27,25 @@ export class LuciferDbRepository {
 
     await this.db
       .prepare('INSERT INTO user_settings (user_id, timezone, budget_mode, auto_approve_tier1, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .bind(id, 'Asia/Kolkata', 'FREE_ONLY', 1, now, now)
+      .bind(id, 'Asia/Kolkata', 'FREE_ONLY', 0, now, now)
       .run();
 
     return { id, telegramId };
+  }
+
+  /**
+   * Retrieves whether Tier 1 actions are auto-approved for a user.
+   * Defaults to false (secure fail-closed) if setting row is absent or null.
+   */
+  public async getUserTier1AutoApprove(userId: string): Promise<boolean> {
+    const row = await this.db
+      .prepare('SELECT auto_approve_tier1 FROM user_settings WHERE user_id = ?')
+      .bind(userId)
+      .first<{ auto_approve_tier1: number | null | undefined }>();
+    if (!row || row.auto_approve_tier1 === null || row.auto_approve_tier1 === undefined) {
+      return false; // Secure default fallback
+    }
+    return Number(row.auto_approve_tier1) === 1;
   }
 
   public async getOrCreateActiveConversation(userId: string): Promise<string> {

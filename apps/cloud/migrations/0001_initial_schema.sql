@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS user_settings (
     user_id TEXT PRIMARY KEY,
     timezone TEXT DEFAULT 'Asia/Kolkata',
     budget_mode TEXT DEFAULT 'FREE_ONLY',
-    auto_approve_tier1 INTEGER DEFAULT 1,
+    auto_approve_tier1 INTEGER DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE

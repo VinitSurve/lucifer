@@ -82,7 +82,8 @@ When executing actions, call the appropriate tools.`
         }
 
         const toolDef = BUILTIN_TOOLS[tc.name];
-        const perm = ToolPermissionGuard.evaluate(toolDef ? toolDef.riskTier : 'TIER_3_DANGEROUS');
+        const userAutoApprove = await this.repo.getUserTier1AutoApprove(userId);
+        const perm = ToolPermissionGuard.evaluate(toolDef ? toolDef.riskTier : 'TIER_3_DANGEROUS', userAutoApprove);
 
         if (perm.requiresApproval) {
           // Pause execution, generate ApprovalRecord

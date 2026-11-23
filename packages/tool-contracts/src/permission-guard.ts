@@ -9,9 +9,10 @@ export interface PermissionCheckResult {
 
 export class ToolPermissionGuard {
   /**
-   * Evaluates if a tool can run automatically or requires human confirmation
+   * Evaluates if a tool can run automatically or requires human confirmation.
+   * Defaults to secure behavior (userAutoApproveTier1 = false).
    */
-  public static evaluate(riskTier: ToolRiskTier, userAutoApproveTier1 = true): PermissionCheckResult {
+  public static evaluate(riskTier: ToolRiskTier, userAutoApproveTier1 = false): PermissionCheckResult {
     switch (riskTier) {
       case 'TIER_0_READ_ONLY':
         return {
