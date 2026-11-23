@@ -4,7 +4,7 @@ import {
   TaskRecord
 } from '@lucifer/shared-types';
 import { BUILTIN_TOOLS, ToolPermissionGuard, ToolLoopGuard } from '@lucifer/tool-contracts';
-import { SecretRedactor } from '@lucifer/security';
+import { SecretRedactor, PromptInjectionDefense } from '@lucifer/security';
 import { ModelRouter } from '@lucifer/provider-registry';
 import { LuciferDbRepository } from '../db/repository';
 import { TelegramBotClient } from './client';
@@ -146,7 +146,10 @@ Do you authorize Lucifer to perform this operation?
         if (tc.name === 'web_search') {
           const q = (tc.arguments.query as string) || '';
           const results = await ResearchService.webSearch(q, 3);
-          toolOutputText = JSON.stringify(results);
+          toolOutputText = PromptInjectionDefense.wrapUntrustedContent('web_search', JSON.stringify(results), {
+            query: q,
+            resultCount: String(results.length)
+          });
         } else if (tc.name === 'fetch_url') {
           const url = (tc.arguments.url as string) || '';
           const fetched = await ResearchService.fetchAndExtractUrl(url);
