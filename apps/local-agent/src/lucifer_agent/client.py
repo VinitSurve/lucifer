@@ -82,6 +82,33 @@ class AgentDaemon:
                 fp = payload.get("filePath")
                 res = self.executor.read_file(fp)
                 self.submit_result(task_id, res.get("success", False), result=res.get("content"), error=res.get("error"))
+            elif task_type == "mac_list_dir":
+                dp = payload.get("dirPath")
+                res = self.executor.list_directory(dp)
+                self.submit_result(task_id, res.get("success", False), result=res.get("entries"), error=res.get("error"))
+            elif task_type == "mac_search_workspace":
+                dp = payload.get("dirPath")
+                q = payload.get("query")
+                res = self.executor.search_workspace(dp, q)
+                self.submit_result(task_id, res.get("success", False), result=res.get("results"), error=res.get("error"))
+            elif task_type == "mac_git_status":
+                rp = payload.get("repoPath")
+                res = self.executor.read_git_status(rp)
+                self.submit_result(task_id, res.get("success", False), result=res.get("stdout"), error=res.get("error"))
+            elif task_type == "mac_git_diff":
+                rp = payload.get("repoPath")
+                cached = bool(payload.get("cached", False))
+                res = self.executor.read_git_diff(rp, cached)
+                self.submit_result(task_id, res.get("success", False), result=res.get("stdout"), error=res.get("error"))
+            elif task_type == "mac_git_log":
+                rp = payload.get("repoPath")
+                max_c = int(payload.get("maxCommits", 10))
+                res = self.executor.read_git_log(rp, max_c)
+                self.submit_result(task_id, res.get("success", False), result=res.get("stdout"), error=res.get("error"))
+            elif task_type == "mac_inspect_manifest":
+                mp = payload.get("manifestPath")
+                res = self.executor.inspect_project_manifest(mp)
+                self.submit_result(task_id, res.get("success", False), result=res, error=res.get("error"))
             elif task_type == "mac_run_command":
                 cmd = payload.get("command")
                 args = payload.get("args") or []
