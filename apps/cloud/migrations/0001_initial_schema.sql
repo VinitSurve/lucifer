@@ -122,6 +122,17 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(created_at);
 
 CREATE TABLE IF NOT EXISTS processed_updates (
     update_id INTEGER PRIMARY KEY,
-    processed_at INTEGER NOT NULL
+    status TEXT NOT NULL DEFAULT 'COMPLETED',
+    processed_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL DEFAULT 0,
+    error TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_processed_updates_time ON processed_updates(processed_at);
+
+CREATE TABLE IF NOT EXISTS pairing_codes (
+    code_hash TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_pairing_codes_owner ON pairing_codes(owner_id);
