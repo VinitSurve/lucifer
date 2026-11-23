@@ -21,6 +21,7 @@ describe('Built-in Tool Contracts', () => {
   it('assigns correct risk tiers', () => {
     expect(BUILTIN_TOOLS['web_search'].riskTier).toBe('TIER_0_READ_ONLY');
     expect(BUILTIN_TOOLS['email_create_draft'].riskTier).toBe('TIER_1_LOW_RISK');
+    expect(BUILTIN_TOOLS['mac_read_file'].riskTier).toBe('TIER_1_LOW_RISK');
     expect(BUILTIN_TOOLS['email_send'].riskTier).toBe('TIER_2_SENSITIVE');
     expect(BUILTIN_TOOLS['mac_run_command'].riskTier).toBe('TIER_3_DANGEROUS');
   });

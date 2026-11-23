@@ -214,3 +214,137 @@ def test_directory_listing_and_workspace_search(tmp_path):
     assert search_res["success"] is True
     assert len(search_res["results"]) > 0
     assert "hello world" in search_res["results"][0]["text"]
+
+def test_adversarial_binary_substitution_blocked(tmp_path):
+    safe_dir = tmp_path / "safe_projects"
+    safe_dir.mkdir()
+    executor = ControlledExecutor([str(safe_dir)])
+
+    canary = tmp_path / "outside_canary.txt"
+
+    # 1. Create malicious executables named echo, ls, git in various locations
+    locations = [
+        tmp_path / "malicious_bin",
+        safe_dir / "nested_bin",
+        safe_dir
+    ]
+    for loc in locations:
+        loc.mkdir(parents=True, exist_ok=True)
+        for cmd_name in ["echo", "ls", "git"]:
+            mal_bin = loc / cmd_name
+            mal_bin.write_text(f"#!/bin/sh\ntouch '{canary}'\nexit 1\n", encoding="utf-8")
+            mal_bin.chmod(0o755)
+
+    # Test all variations of path invocation
+    prohibited_invocations = [
+        str(safe_dir / "echo"),
+        str(safe_dir / "ls"),
+        str(safe_dir / "git"),
+        "./echo",
+        "./ls",
+        "./git",
+        "../safe_projects/echo",
+        str(tmp_path / "malicious_bin" / "echo"),
+        str(tmp_path / "malicious_bin" / "ls"),
+        str(tmp_path / "malicious_bin" / "git"),
+        f"{safe_dir}/nested_bin/echo",
+        "/bin/echo",
+        "/bin/ls",
+        "/usr/bin/git",
+        "echo\x00extra",
+        "echo/extra"
+    ]
+
+    for inv in prohibited_invocations:
+        res = executor.execute_command(inv, ["hello"], str(safe_dir))
+        assert res["success"] is False
+        assert "Invalid command identifier" in res["error"] or "outside permitted" in res.get("error", "") or "not in the local agent" in res.get("error", "")
+        assert canary.exists() is False, f"Malicious executable was invoked for: {inv}"
+
+    # Verify that safe bare command execution continues to function properly
+    safe_echo = executor.execute_command("echo", ["safe_call", "test"], str(safe_dir))
+    assert safe_echo["success"] is True
+    assert "safe_call test" in safe_echo["stdout"]
+    assert canary.exists() is False
+
+def test_adversarial_case_insensitive_sensitive_files(tmp_path):
+    safe_dir = tmp_path / "safe_projects"
+    safe_dir.mkdir()
+    executor = ControlledExecutor([str(safe_dir)])
+
+    # Test case variations and modern credential file types
+    sensitive_samples = [
+        (".env", "SECRET=1"),
+        (".ENV", "SECRET=2"),
+        (".Env", "SECRET=3"),
+        (".eNv", "SECRET=4"),
+        (".env.local", "SECRET=5"),
+        (".ENV.PRODUCTION", "SECRET=6"),
+        (".envrc", "export SECRET=7"),
+        ("credentials.json", '{"key": "secret"}'),
+        ("CREDENTIALS.JSON", '{"key": "secret"}'),
+        ("Credentials.Yaml", "key: secret"),
+        (".git-credentials", "https://token@github.com"),
+        (".GIT-CREDENTIALS", "https://token@github.com"),
+        ("wrangler.toml", 'token="cf_secret"'),
+        ("WRANGLER.TOML", 'token="cf_secret"'),
+        ("Wrangler.Toml", 'token="cf_secret"'),
+        (".npmrc", "//registry.npmjs.org/:_authToken=secret"),
+        (".NPMRC", "//registry.npmjs.org/:_authToken=secret"),
+        (".pypirc", "password = secret"),
+        (".netrc", "password secret"),
+        ("id_rsa", "PRIVATE KEY DATA"),
+        ("ID_RSA", "PRIVATE KEY DATA"),
+        ("id_ed25519", "PRIVATE KEY DATA"),
+        ("server.key", "PRIVATE KEY DATA"),
+        ("SERVER.KEY", "PRIVATE KEY DATA"),
+        ("cert.pem", "CERT DATA"),
+        ("CERT.PEM", "CERT DATA"),
+        (".docker/config.json", '{"auths": {}}'),
+        (".aws/credentials", "[default]\naws_secret_access_key=secret"),
+        (".git/config", "[core]\nbare=false"),
+        (".git/HEAD", "ref: refs/heads/main"),
+        ("secrets/api_token.txt", "token=12345"),
+        ("private_keys/deploy.key", "KEY DATA")
+    ]
+
+    for fname, content in sensitive_samples:
+        file_path = safe_dir / fname
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(content, encoding="utf-8")
+
+        # Must be recognized as sensitive
+        assert executor.is_sensitive_file(str(file_path)) is True, f"Failed sensitive check: {fname}"
+        # Direct read must be blocked
+        read_res = executor.read_file(str(file_path))
+        assert read_res["success"] is False, f"Sensitive file read was not blocked: {fname}"
+        assert "Access to sensitive file" in read_res["error"]
+
+def test_adversarial_symlink_escape_and_traversal(tmp_path):
+    safe_dir = tmp_path / "safe_projects"
+    safe_dir.mkdir()
+    outside_dir = tmp_path / "outside_world"
+    outside_dir.mkdir()
+
+    outside_secret = outside_dir / "target_secret.txt"
+    outside_secret.write_text("SUPER_CONFIDENTIAL_DATA", encoding="utf-8")
+
+    executor = ControlledExecutor([str(safe_dir)])
+
+    # 1. Symlink inside safe_dir pointing to outside secret
+    symlink_file = safe_dir / "symlink_to_secret.txt"
+    symlink_file.symlink_to(outside_secret)
+
+    res_symlink = executor.read_file(str(symlink_file))
+    assert res_symlink["success"] is False
+    assert "Access denied" in res_symlink["error"]
+
+    # 2. Path traversal with ..
+    res_traversal = executor.read_file(str(safe_dir / ".." / "outside_world" / "target_secret.txt"))
+    assert res_traversal["success"] is False
+    assert "Access denied" in res_traversal["error"]
+
+    # 3. Path traversal in execute_command cwd
+    res_cwd_traversal = executor.execute_command("echo", ["hello"], str(safe_dir / ".." / "outside_world"))
+    assert res_cwd_traversal["success"] is False
+    assert "outside permitted" in res_cwd_traversal["error"]

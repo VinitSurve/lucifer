@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import stat
 import shutil
 import subprocess
 from pathlib import Path
@@ -101,43 +102,89 @@ class ControlledExecutor:
     # Block any shell metacharacters or dangerous control codes in arguments
     METACHO_REGEX = re.compile(r"[;&|`$\n\r><\(\)\{\}\[\]!]")
 
-    # Sensitive files that must NEVER be read or exposed
+    # Sensitive files that must NEVER be read or exposed (case-insensitive across macOS/Linux)
     SENSITIVE_FILE_PATTERNS = [
-        re.compile(r"(^|/)\.env(_.*|\..*)?$"),                 # .env, .env_production, .env.local, .env.backup
-        re.compile(r"(^|/)credentials(\..+)?$"),              # credentials, credentials.yaml, credentials.json
-        re.compile(r"(^|/)wrangler\.toml$"),                  # Cloudflare worker configs
-        re.compile(r"(^|/)id_(rsa|dsa|ecdsa|ed25519)"),      # SSH private keys
-        re.compile(r"\.(pem|key|p12|pfx|pkcs12)$"),           # Certificates and keys
-        re.compile(r"(^|/)(secrets|\.netrc|\.npmrc|\.aws/credentials)"),
-        re.compile(r"(^|/)\.git/(config|hooks)")              # Git internal configs and hooks
+        # Environment files (.env, .env.local, .env_production, .envrc, etc.)
+        re.compile(r"(^|/)\.env(_.*|\..*)?$", re.IGNORECASE),
+        re.compile(r"(^|/)\.envrc$", re.IGNORECASE),
+        # Credential files
+        re.compile(r"(^|/)credentials(\..+)?$", re.IGNORECASE),
+        re.compile(r"(^|/)\.git-credentials$", re.IGNORECASE),
+        re.compile(r"(^|/)\.netrc$", re.IGNORECASE),
+        re.compile(r"(^|/)\.npmrc$", re.IGNORECASE),
+        re.compile(r"(^|/)\.pypirc$", re.IGNORECASE),
+        # Cloud and tool configs
+        re.compile(r"(^|/)wrangler\.toml$", re.IGNORECASE),
+        re.compile(r"(^|/)\.docker/config\.json$", re.IGNORECASE),
+        re.compile(r"(^|/)\.(aws|gcloud|azure)(/|$)", re.IGNORECASE),
+        # SSH and cryptographic keys
+        re.compile(r"(^|/)\.ssh(/|$)", re.IGNORECASE),
+        re.compile(r"(^|/)id_(rsa|dsa|ecdsa|ed25519)(\..*)?$", re.IGNORECASE),
+        re.compile(r"(^|/)(authorized_keys|known_hosts)$", re.IGNORECASE),
+        re.compile(r"\.(pem|key|p12|pfx|pkcs12|keystore)$", re.IGNORECASE),
+        # Secrets directories & Git metadata
+        re.compile(r"(^|/)\.?(secrets|private_keys)(/|$)", re.IGNORECASE),
+        re.compile(r"(^|/)\.git/(config|hooks|HEAD|index|credentials)", re.IGNORECASE)
     ]
 
     def __init__(self, allowed_directories: List[str]):
         self.allowed_directories = [Path(d).resolve() for d in allowed_directories]
 
     def is_path_safe(self, target_path: str) -> bool:
-        """Ensures path stays strictly within allowlisted directories and prevents symlink escape."""
+        """Ensures path stays strictly within allowlisted directories and prevents traversal or symlink escape."""
+        if not target_path or not isinstance(target_path, str):
+            return False
+        # Reject raw traversal markers before resolution
+        raw_parts = re.split(r"[/\\]+", target_path)
+        if ".." in raw_parts:
+            return False
         try:
             p = Path(target_path)
-            # Resolve symlinks to target destination
+            # Resolve symlinks to target canonical destination
             resolved = p.resolve(strict=False)
-            return any(resolved == allowed or allowed in resolved.parents for allowed in self.allowed_directories)
+            resolved_lower = str(resolved).lower()
+            return any(
+                str(allowed).lower() == resolved_lower or str(allowed).lower() in [str(parent).lower() for parent in resolved.parents]
+                for allowed in self.allowed_directories
+            )
         except Exception:
             return False
 
     def is_sensitive_file(self, target_path: str) -> bool:
-        """Checks if a file matches known sensitive credential patterns."""
-        path_str = str(Path(target_path).resolve())
-        return any(pattern.search(path_str) for pattern in self.SENSITIVE_FILE_PATTERNS)
+        """Checks if a file matches known sensitive credential patterns using case-insensitive canonical evaluation."""
+        if not target_path:
+            return False
+        try:
+            p = Path(target_path)
+            posix_path = p.as_posix()
+            resolved_posix = p.resolve(strict=False).as_posix()
+            # Normalize macOS system /private/var and /private/tmp prefix to avoid false positives on OS temp directories
+            if resolved_posix.startswith("/private/var/") or resolved_posix.startswith("/private/tmp/"):
+                resolved_posix = resolved_posix[len("/private"):]
+
+            name = p.name
+            # Check pattern matches against path, canonical path, and basename
+            for pattern in self.SENSITIVE_FILE_PATTERNS:
+                if pattern.search(posix_path) or pattern.search(resolved_posix) or pattern.search(name):
+                    return True
+            return False
+        except Exception:
+            return True # Fail closed on error
 
     # =========================================================================
     # CAPABILITY-BASED OPERATIONS
     # =========================================================================
 
     def read_file(self, file_path: str, max_bytes: int = 512_000) -> Dict[str, Any]:
-        """Reads a file safely if within allowed projects and not sensitive."""
+        """Reads a file safely if within allowed projects and not sensitive.
+        Uses descriptor-level inspection (fstat) to prevent TOCTOU race conditions.
+        """
         if not self.is_path_safe(file_path):
             return {"success": False, "error": f"Access denied to file: {file_path}"}
+
+        # Check sensitivity against both requested path and canonical resolved path
+        if self.is_sensitive_file(file_path):
+            return {"success": False, "error": f"Access to sensitive file '{Path(file_path).name}' is strictly blocked."}
 
         p = Path(file_path).resolve()
         if not p.is_file():
@@ -146,12 +193,23 @@ class ControlledExecutor:
         if self.is_sensitive_file(str(p)):
             return {"success": False, "error": f"Access to sensitive file '{p.name}' is strictly blocked."}
 
-        if p.stat().st_size > max_bytes:
-            return {"success": False, "error": f"File size exceeds {max_bytes // 1024}KB limit"}
-
+        # Open file descriptor for TOCTOU-safe inspection and read
         try:
-            content = p.read_text(encoding="utf-8", errors="replace")
-            return {"success": True, "content": content}
+            fd = os.open(str(p), os.O_RDONLY)
+            try:
+                st = os.fstat(fd)
+                if not stat.S_ISREG(st.st_mode):
+                    return {"success": False, "error": f"Path is not a regular file: {file_path}"}
+                if st.st_size > max_bytes:
+                    return {"success": False, "error": f"File size exceeds {max_bytes // 1024}KB limit"}
+
+                with open(fd, "r", encoding="utf-8", errors="replace", closefd=False) as f:
+                    content = f.read(max_bytes + 1)
+                    if len(content.encode("utf-8")) > max_bytes:
+                        return {"success": False, "error": f"File size exceeds {max_bytes // 1024}KB limit"}
+                    return {"success": True, "content": content}
+            finally:
+                os.close(fd)
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -263,12 +321,26 @@ class ControlledExecutor:
     # SAFE GIT INSPECTION (Hardened against repository poisoning)
     # =========================================================================
 
+    @staticmethod
+    def _resolve_system_git() -> Optional[str]:
+        """Resolves system git binary from trusted absolute system paths only."""
+        trusted_paths = ["/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git"]
+        for p in trusted_paths:
+            if os.path.isfile(p) and os.access(p, os.X_OK):
+                return p
+        which_git = shutil.which("git")
+        if which_git and os.path.isabs(which_git) and os.path.isfile(which_git) and os.access(which_git, os.X_OK):
+            return which_git
+        return None
+
     def _execute_safe_git(self, subcmd_args: List[str], repo_path: str) -> Dict[str, Any]:
         """Executes a Git read operation with strict safety overrides to prevent hook or driver execution."""
         if not self.is_path_safe(repo_path):
             return {"success": False, "error": f"Repository path outside allowed directories: {repo_path}"}
 
-        git_bin = shutil.which("git") or "/usr/bin/git"
+        git_bin = self._resolve_system_git()
+        if not git_bin:
+            return {"success": False, "error": "System Git binary not found in trusted system directories."}
 
         # Mandatory overrides to neutralize malicious .git/config, hooks, pagers, and fsmonitors
         safe_git_flags = [
@@ -286,7 +358,10 @@ class ControlledExecutor:
                 return {"success": False, "error": f"Disallowed character in git argument: '{arg}'"}
             if ".." in arg:
                 return {"success": False, "error": f"Path traversal ('..') disallowed in git argument: '{arg}'"}
-            if arg.startswith("--output") or arg.startswith("-o") or arg.startswith("--ext-diff") or arg.startswith("--exec-path"):
+            if (arg.startswith("--output") or arg.startswith("-o") or arg.startswith("--ext-diff")
+                    or arg.startswith("--exec-path") or arg.startswith("--work-tree") or arg.startswith("--git-dir")
+                    or arg.startswith("--config") or arg == "-c" or arg.startswith("--upload-pack")
+                    or arg.startswith("--receive-pack")):
                 return {"success": False, "error": f"Dangerous git flag disallowed: '{arg}'"}
 
         cmd = [git_bin] + safe_git_flags + subcmd_args
@@ -332,10 +407,22 @@ class ControlledExecutor:
     # =========================================================================
 
     def execute_command(self, command: str, args: List[str], cwd: str) -> Dict[str, Any]:
-        """Executes a permitted inspection command or routes code execution to isolated container."""
-        cmd_name = Path(command).name
+        """Executes a permitted inspection command or routes code execution to isolated container.
+        Strictly forbids user-supplied binary paths, path separators, or arbitrary host execution.
+        """
+        if not command or not isinstance(command, str):
+            return {"success": False, "error": "Command must be a non-empty string identifier."}
 
-        # 1. Explicitly rejected commands that execute arbitrary code/scripts on host
+        # 1. Reject any path separators, traversal, or special characters in command identifier
+        if not re.match(r"^[a-zA-Z0-9_-]+$", command):
+            return {
+                "success": False,
+                "error": f"Invalid command identifier: '{command}'. Path separators, slashes, and traversal characters are strictly prohibited."
+            }
+
+        cmd_name = command.lower()
+
+        # 2. Explicitly rejected commands that execute arbitrary code/scripts on host
         BLOCKED_HOST_COMMANDS = {
             "python", "python3", "node", "bash", "sh", "zsh",
             "npm", "pnpm", "yarn", "pytest", "uv"
@@ -344,7 +431,7 @@ class ControlledExecutor:
         if cmd_name in BLOCKED_HOST_COMMANDS:
             # Check if isolated container execution is available
             if IsolatedExecutionProvider.is_isolation_available():
-                # Route to isolated disposable container
+                # Route to isolated disposable container with bare command name (NEVER a host path)
                 return IsolatedExecutionProvider.execute_in_container(
                     image="python:3.12-slim" if "py" in cmd_name else "node:20-slim",
                     command=[cmd_name] + args,
@@ -358,7 +445,7 @@ class ControlledExecutor:
         if cmd_name not in self.ALLOWED_COMMANDS:
             return {
                 "success": False,
-                "error": f"Command '{cmd_name}' is not in the local agent command allowlist."
+                "error": f"Command '{cmd_name}' is not in the local agent command allowlist. Permitted commands: {sorted(list(self.ALLOWED_COMMANDS))}"
             }
 
         if not self.is_path_safe(cwd):
@@ -367,7 +454,7 @@ class ControlledExecutor:
                 "error": f"Working directory '{cwd}' is outside permitted directories."
             }
 
-        # 2. Git is handled via safe inspection pipeline
+        # 3. Git is handled via safe inspection pipeline
         if cmd_name == "git":
             if not args:
                 return {"success": False, "error": "Git command requires a subcommand."}
@@ -377,37 +464,67 @@ class ControlledExecutor:
                 return {"success": False, "error": f"Git subcommand '{subcmd}' is not permitted. Only {allowed_subcmds} are allowed."}
             return self._execute_safe_git(args, cwd)
 
-        # 3. Echo / Ls safe handling
-        for arg in args:
-            if self.METACHO_REGEX.search(arg):
-                return {"success": False, "error": f"Disallowed character in argument: '{arg}'"}
-            if ".." in arg:
-                return {"success": False, "error": f"Path traversal in argument: '{arg}'"}
+        # 4. Echo - Python-native implementation (zero subprocesses spawned)
+        if cmd_name == "echo":
+            for arg in args:
+                if self.METACHO_REGEX.search(arg):
+                    return {"success": False, "error": f"Disallowed character in argument: '{arg}'"}
+                if ".." in arg:
+                    return {"success": False, "error": f"Path traversal in argument: '{arg}'"}
+            return {
+                "success": True,
+                "returncode": 0,
+                "stdout": " ".join(args) + "\n",
+                "stderr": ""
+            }
 
+        # 5. Ls - Python-native implementation (zero subprocesses spawned)
         if cmd_name == "ls":
             allowed_ls_flags = {"-l", "-a", "-la", "-lh", "-lah", "-1"}
+            target_dir = cwd
+            show_hidden = False
+            long_format = False
             for arg in args:
-                if arg.startswith("-") and arg not in allowed_ls_flags:
-                    return {"success": False, "error": f"Disallowed ls flag: '{arg}'"}
+                if self.METACHO_REGEX.search(arg):
+                    return {"success": False, "error": f"Disallowed character in argument: '{arg}'"}
+                if ".." in arg:
+                    return {"success": False, "error": f"Path traversal in argument: '{arg}'"}
+                if arg.startswith("-"):
+                    if arg not in allowed_ls_flags:
+                        return {"success": False, "error": f"Disallowed ls flag: '{arg}'"}
+                    if "a" in arg:
+                        show_hidden = True
+                    if "l" in arg or "1" in arg:
+                        long_format = True
+                else:
+                    target_dir = str(Path(cwd) / arg)
 
-        cmd_list = [command] + args
-        try:
-            proc = subprocess.run(
-                cmd_list,
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=15,
-                env=SAFE_PROCESS_ENV, # Isolated environment
-                shell=False
-            )
-            return {
-                "success": proc.returncode == 0,
-                "returncode": proc.returncode,
-                "stdout": proc.stdout[:10000],
-                "stderr": proc.stderr[:5000]
-            }
-        except subprocess.TimeoutExpired:
-            return {"success": False, "error": "Execution timed out (15s limit)"}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+            if not self.is_path_safe(target_dir):
+                return {"success": False, "error": f"Target directory outside permitted directories: {target_dir}"}
+
+            try:
+                p = Path(target_dir).resolve()
+                if not p.is_dir():
+                    return {"success": False, "error": f"Not a directory: {target_dir}"}
+                entries = []
+                for entry in sorted(p.iterdir()):
+                    if entry.name.startswith(".") and not show_hidden:
+                        continue
+                    if self.is_sensitive_file(str(entry)):
+                        continue
+                    if long_format:
+                        st = entry.stat()
+                        is_d = "d" if entry.is_dir() else "-"
+                        entries.append(f"{is_d}rw-r--r-- {st.st_size:>8} {entry.name}")
+                    else:
+                        entries.append(entry.name)
+                return {
+                    "success": True,
+                    "returncode": 0,
+                    "stdout": "\n".join(entries) + ("\n" if entries else ""),
+                    "stderr": ""
+                }
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+
+        return {"success": False, "error": f"Unsupported command: '{cmd_name}'"}

@@ -197,7 +197,7 @@ export const BUILTIN_TOOLS: Record<string, ToolDefinition> = {
   mac_read_file: {
     name: 'mac_read_file',
     description: 'Reads a source code or config file from an approved project directory.',
-    riskTier: 'TIER_0_READ_ONLY',
+    riskTier: 'TIER_1_LOW_RISK',
     executionTarget: 'LOCAL_MAC',
     timeoutMs: 10000,
     parameters: {
