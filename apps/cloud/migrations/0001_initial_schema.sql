@@ -119,3 +119,9 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(created_at);
+
+CREATE TABLE IF NOT EXISTS processed_updates (
+    update_id INTEGER PRIMARY KEY,
+    processed_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_processed_updates_time ON processed_updates(processed_at);

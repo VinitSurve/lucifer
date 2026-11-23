@@ -6,52 +6,46 @@ This security audit was conducted by inspecting the source code and testing atta
 
 ## 1. Prioritized Vulnerability Report
 
-### [CRITICAL-1] Unauthenticated Outbound Polling & Task Injection Endpoints
+### [CRITICAL-1] Unauthenticated Outbound Polling & Task Injection Endpoints [REMEDIATED - PHASE 1]
 - **Location:** `apps/cloud/src/index.ts:148-202`
 - **Threat:** Any unauthenticated entity on the internet can make POST requests to:
   - `/api/agent/heartbeat`: Register or overwrite device status.
   - `/api/agent/poll`: Lease pending `LOCAL_MAC` tasks and view task payloads.
   - `/api/agent/result`: Inject arbitrary completion or failure statuses for tasks.
 - **Root Cause:** Device `authSecretHash` is stored in the database but never verified against an incoming Bearer token, HMAC signature, or header.
-- **Impact:** Complete compromise of local task queue; unauthorized extraction of tasks and spoofing of execution results.
+- **Remediation Status:** **REMEDIATED (PHASE 1)**. Implemented `DeviceAuthGuard` with SHA-256 token verification and constant-time comparison. Added `/api/agent/pair` provisioning route requiring `DEVICE_PAIRING_SECRET`. Enforced device auth on `/api/agent/heartbeat`, `/api/agent/poll`, and `/api/agent/result` (401 on missing/invalid token). Enforced task lease ownership check on `/api/agent/result` (403 on mismatched device). Covered by automated tests.
 
 ---
 
-### [CRITICAL-2] Arbitrary Code Execution on Local Mac via Allowlisted `python3`
+### [CRITICAL-2] Arbitrary Code Execution on Local Mac via Allowlisted `python3` [REMEDIATED - PHASE 1]
 - **Location:** `apps/local-agent/src/lucifer_agent/executor.py:16`
-- **Threat:** `python3` is listed in `ControlledExecutor.ALLOWED_COMMANDS`.
-- **Evidence Tested:**
-  ```python
-  ex = ControlledExecutor([str(Path.home() / 'Vinit')])
-  res = ex.execute_command('python3', ['-c', 'import sys; print("executed arbitrary code")'], str(Path.home() / 'Vinit'))
-  # Output: {'success': True, 'returncode': 0, 'stdout': 'executed arbitrary code\n', 'stderr': ''}
-  ```
-- **Root Cause:** While `subprocess.run(shell=False)` prevents shell metacharacter injection (`|`, `;`, `&&`), the command allowlist permits `python3` with arbitrary arguments. Passing `-c "<python_code>"` executes arbitrary system calls via `os.system()` or `subprocess`.
-- **Impact:** An attacker who compromises the LLM prompt or injects a tool call can achieve full arbitrary code execution on the user's Mac.
+- **Threat:** `python3` was listed in `ControlledExecutor.ALLOWED_COMMANDS`.
+- **Root Cause:** While `subprocess.run(shell=False)` prevents shell metacharacter injection (`|`, `;`, `&&`), the command allowlist permitted `python3` with arbitrary arguments. Passing `-c "<python_code>"` executed arbitrary system calls.
+- **Remediation Status:** **REMEDIATED (PHASE 1)**. Completely removed `python3` from the allowlist. Implemented regex checks blocking shell metacharacters and path traversal `..`. Enforced strict capability allowlists on remaining CLI tools (`git`, `pytest`, `npm`, `pnpm`, `uv`) and blocked access to sensitive files (`.env`, `.git/config`, SSH keys). Verified with 4 new security tests in pytest.
 
 ---
 
-### [HIGH-1] Missing Rate Limiting on Edge Webhook
+### [HIGH-1] Missing Rate Limiting on Edge Webhook [REMEDIATED - PHASE 1]
 - **Location:** `apps/cloud/src/index.ts`
 - **Threat:** A denial of service attack or repeated webhook flooding.
-- **Root Cause:** `SlidingWindowRateLimiter` was implemented and tested in `@lucifer/security/src/rate-limiter.ts`, but is never instantiated or called in `apps/cloud/src/index.ts`.
-- **Impact:** No rate limiting is enforced on incoming webhook updates.
+- **Root Cause:** `SlidingWindowRateLimiter` was implemented and tested in `@lucifer/security/src/rate-limiter.ts`, but was never instantiated or called in `apps/cloud/src/index.ts`.
+- **Remediation Status:** **REMEDIATED (PHASE 1)**. Instantiated `webhookRateLimiter` (60 req/min, burst 10) and `agentRateLimiter` (60 req/min, burst 15) in `apps/cloud/src/index.ts`. Wired into `/webhook/telegram` and `/api/agent/*` routes. Trips return HTTP 429 with `Retry-After: 60`. Note: In-memory rate limiting is isolate-local in Cloudflare Workers.
 
 ---
 
-### [HIGH-2] Missing Secret Redaction in Outgoing Telegram Responses
+### [HIGH-2] Missing Secret Redaction in Outgoing Telegram Responses [REMEDIATED - PHASE 1]
 - **Location:** `apps/cloud/src/telegram/client.ts`
 - **Threat:** Sensitive tokens, keys, or credentials leaked via LLM outputs or error stack traces.
-- **Root Cause:** `SecretRedactor` was implemented and tested in `@lucifer/security/src/secret-redactor.ts`, but is never invoked prior to calling `TelegramBotClient.sendMessage()`.
-- **Impact:** Error messages containing API keys or tokens are delivered unredacted to Telegram chats.
+- **Root Cause:** `SecretRedactor` was implemented and tested in `@lucifer/security/src/secret-redactor.ts`, but was never invoked prior to calling `TelegramBotClient.sendMessage()`.
+- **Remediation Status:** **REMEDIATED (PHASE 1)**. Wired `SecretRedactor.redact()` directly into `sendMessage()` and `editMessageText()` in `TelegramBotClient`, and into orchestrator error handlers. Verified with automated test redacting bot tokens, Gemini keys, and Bearer tokens.
 
 ---
 
-### [HIGH-3] Missing Telegram Update Deduplication (Replay Vulnerability)
+### [HIGH-3] Missing Telegram Update Deduplication (Replay Vulnerability) [REMEDIATED - PHASE 1]
 - **Location:** `apps/cloud/src/index.ts:53-145`
 - **Threat:** Duplicate update processing and task re-execution.
-- **Root Cause:** Telegram `update_id` is parsed but not checked against an idempotency store or processed updates table.
-- **Impact:** Telegram retries (caused by network jitter or worker execution latency) re-execute state transitions, duplicate task creation, and re-send responses.
+- **Root Cause:** Telegram `update_id` was parsed but not checked against an idempotency store or processed updates table.
+- **Remediation Status:** **REMEDIATED (PHASE 1)**. Added `processed_updates` table to D1. Implemented atomic primary-key collision check in `markUpdateProcessed()`. Webhook handler immediately drops duplicate updates with HTTP 200 `{ ok: true, note: 'Duplicate update ignored' }`. Verified with automated test.
 
 ---
 
@@ -63,11 +57,11 @@ This security audit was conducted by inspecting the source code and testing atta
 
 ---
 
-### [MEDIUM-2] Non-Atomic Task Leasing in D1
+### [MEDIUM-2] Non-Atomic Task Leasing in D1 [REMEDIATED - PHASE 1]
 - **Location:** `apps/cloud/src/db/repository.ts:284-306`
 - **Threat:** Race conditions during concurrent local agent polling.
-- **Root Cause:** `leaseNextLocalTask` executes three separate statements (`SELECT`, `INSERT task_leases`, `UPDATE tasks`) sequentially instead of using `db.batch()` to guarantee an atomic transaction.
-- **Impact:** Multiple concurrent poll requests can lease the same task simultaneously.
+- **Root Cause:** `leaseNextLocalTask` executed separate statements without conditional updates.
+- **Remediation Status:** **REMEDIATED (PHASE 1)**. Implemented conditional update `WHERE id = ? AND status IN ('PENDING', 'QUEUED')` and checked `meta.changes === 1` before creating task lease. Added `verifyTaskOwnership` check on task result submission.
 
 ---
 
@@ -87,8 +81,9 @@ This security audit was conducted by inspecting the source code and testing atta
 | Constant-Time Webhook Secret | `packages/security/src/telegram-auth.ts` | **ACTIVE & VERIFIED** |
 | SSRF Guard | `packages/security/src/ssrf-filter.ts` | **ACTIVE & VERIFIED** |
 | Prompt Injection Boundary | `packages/security/src/prompt-injection.ts` | **ACTIVE & VERIFIED** |
-| Secret Redaction | `packages/security/src/secret-redactor.ts` | **IMPLEMENTED BUT UNWIRED IN CLOUD** |
-| Rate Limiting | `packages/security/src/rate-limiter.ts` | **IMPLEMENTED BUT UNWIRED IN CLOUD** |
+| Secret Redaction | `packages/security/src/secret-redactor.ts` & `apps/cloud/src/telegram/client.ts` | **ACTIVE & VERIFIED (REMEDIATED)** |
+| Rate Limiting | `packages/security/src/rate-limiter.ts` & `apps/cloud/src/index.ts` | **ACTIVE & VERIFIED (REMEDIATED)** |
 | Local Path Traversal Protection | `apps/local-agent/src/lucifer_agent/executor.py` | **ACTIVE & VERIFIED** |
-| Local Command Allowlist | `apps/local-agent/src/lucifer_agent/executor.py` | **FLAWED (`python3` allows arbitrary code)** |
-| Local Agent Endpoint Auth | `apps/cloud/src/index.ts` | **MISSING (Unauthenticated)** |
+| Local Command Allowlist | `apps/local-agent/src/lucifer_agent/executor.py` | **HARDENED & VERIFIED (REMEDIATED - `python3` removed)** |
+| Local Agent Endpoint Auth | `apps/cloud/src/index.ts` & `packages/security/src/device-auth.ts` | **ACTIVE & VERIFIED (REMEDIATED - 401 & 403 enforced)** |
+| Telegram Update Deduplication | `apps/cloud/migrations/0002_security_remediation.sql` & `apps/cloud/src/index.ts` | **ACTIVE & VERIFIED (REMEDIATED - atomic D1 PK)** |

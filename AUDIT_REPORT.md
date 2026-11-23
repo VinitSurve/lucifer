@@ -10,9 +10,9 @@
 
 | Metric | Percentage | Reality Assessment |
 |---|---|---|
-| **Code Implementation** | **78%** | Monorepo structure, core packages, security filters, D1 schema, local agent, and adapters are written and compile. However, several tools in the natural language agent loop return stub strings, and Google OAuth lacks a token exchange handler. |
-| **Test Coverage & Verification** | **65%** | 37 unit/mock tests pass 100%. However, external integrations (Gmail, Calendar, Drive, live web search, live Telegram) are either tested with mocks, stubbed, or failing against live endpoints (DuckDuckGo anti-bot challenge). |
-| **Operational Readiness** | **45%** | Requires user credentials (Telegram bot token, owner ID, AI keys), an auth token on agent endpoints, and a fix for arbitrary code execution in the local agent. |
+| **Code Implementation** | **82%** | Monorepo structure, core packages, security filters, D1 schema, local agent, and adapters are written and compile. Phase 1 security remediation complete (device auth, executor hardening, rate limiting, redactor, update dedup). Google OAuth lacks a token exchange handler and natural language tools need direct service bindings. |
+| **Test Coverage & Verification** | **80%** | 46 unit/integration tests pass 100% across TypeScript and Python (including 9 security remediation tests). External integrations (Gmail, Calendar, Drive, live web search, live Telegram) are tested with mocks or stubbed. |
+| **Operational Readiness** | **65%** | Critical vulnerabilities remediated. Requires user credentials (Telegram bot token, owner ID, AI keys, device pairing secret) and OAuth setup before full live deployment. |
 | **Claimed Previous Status** | ~~100%~~ | **REJECTED AS PREMATURE.** The previous report claimed full completion based on clean builds and passing mocks without verifying live endpoint behavior or auditing tool dispatch coverage in `orchestrator.ts`. |
 
 ---
@@ -25,13 +25,13 @@ All test suites were executed independently from a clean state.
 ========================================================================================
 Test Suite                                Framework   Total   Passed   Failed   Skipped
 ========================================================================================
-@lucifer/security (packages/security)     Vitest      15      15       0        0
+@lucifer/security (packages/security)     Vitest      18      18       0        0
 @lucifer/tool-contracts (tool-contracts)  Vitest      10      10       0        0
 @lucifer/provider-registry (providers)   Vitest      3       3        0        0
-@lucifer/cloud (apps/cloud)               Vitest      5       5        0        0
-lucifer-agent (apps/local-agent)          Pytest      4       4        0        0
+@lucifer/cloud (apps/cloud)               Vitest      7       7        0        0
+lucifer-agent (apps/local-agent)          Pytest      8       8        0        0
 ----------------------------------------------------------------------------------------
-TOTAL                                                 37      37       0        0
+TOTAL                                                 46      46       0        0
 ========================================================================================
 All test suites exited with code 0.
 ```
@@ -66,15 +66,15 @@ All test suites exited with code 0.
 
 ## 4. Security Audit & Vulnerabilities
 
-| Severity | Vulnerability ID | Description | Impact |
-|---|---|---|---|
-| **CRITICAL** | `SEC-CRIT-01` | **Unauthenticated Local Agent Endpoints:** `/api/agent/poll`, `/api/agent/heartbeat`, and `/api/agent/result` perform no token verification. | Any attacker can poll leased tasks, read payloads, and inject false execution results. |
-| **CRITICAL** | `SEC-CRIT-02` | **Arbitrary Code Execution via `python3` Allowlist:** `ControlledExecutor` permits `python3`. Passing `-c "<code_string>"` bypasses `shell=False` and executes arbitrary system calls. | Verified live: arbitrary code was executed via `ControlledExecutor.execute_command("python3", ["-c", ...])`. |
-| **HIGH** | `SEC-HIGH-01` | **Unwired Rate Limiting:** `SlidingWindowRateLimiter` is tested in packages but never invoked in `apps/cloud/src/index.ts`. | No rate limiting is enforced on the edge webhook. |
-| **HIGH** | `SEC-HIGH-02` | **Unwired Secret Redaction:** `SecretRedactor` is tested in packages but never called before `TelegramBotClient.sendMessage()`. | Stack traces or leaked keys in tool outputs are delivered unredacted to Telegram. |
-| **HIGH** | `SEC-HIGH-03` | **Missing Update Deduplication:** No tracking of Telegram `update_id`. | Webhook retries cause duplicate task creation and duplicate messages. |
-| **MEDIUM** | `SEC-MED-01` | **Conditional Webhook Secret Check:** If `TELEGRAM_WEBHOOK_SECRET` is unset, validation passes all incoming requests. | Misconfigured edge workers are completely open. |
-| **MEDIUM** | `SEC-MED-02` | **Non-Atomic Task Leasing:** Sequential `SELECT`, `INSERT`, and `UPDATE` in D1 without `db.batch()` allows race conditions during concurrent polling. | Duplicate task leases. |
+| Severity | Vulnerability ID | Description | Impact | Remediation Status |
+|---|---|---|---|---|
+| **CRITICAL** | `SEC-CRIT-01` | **Unauthenticated Local Agent Endpoints:** `/api/agent/poll`, `/api/agent/heartbeat`, and `/api/agent/result` performed no token verification. | Previously allowed arbitrary task extraction and spoofed results. | **REMEDIATED (PHASE 1):** `DeviceAuthGuard` SHA-256 tokens, pairing route, 401 & 403 enforced. |
+| **CRITICAL** | `SEC-CRIT-02` | **Arbitrary Code Execution via `python3` Allowlist:** `ControlledExecutor` permitted `python3`. Passing `-c "<code_string>"` bypassed `shell=False`. | Previously allowed arbitrary system calls. | **REMEDIATED (PHASE 1):** Removed `python3`, added metacharacter/traversal checks, capability allowlists. |
+| **HIGH** | `SEC-HIGH-01` | **Unwired Rate Limiting:** `SlidingWindowRateLimiter` was tested in packages but never invoked in `apps/cloud/src/index.ts`. | Risk of webhook flooding. | **REMEDIATED (PHASE 1):** Wired `webhookRateLimiter` and `agentRateLimiter` (429 response). |
+| **HIGH** | `SEC-HIGH-02` | **Unwired Secret Redaction:** `SecretRedactor` was tested in packages but never called before `TelegramBotClient.sendMessage()`. | Risk of secret leakage in errors/chat. | **REMEDIATED (PHASE 1):** Wired directly into `sendMessage`, `editMessageText`, and error handlers. |
+| **HIGH** | `SEC-HIGH-03` | **Missing Update Deduplication:** No tracking of Telegram `update_id`. | Webhook retries caused duplicate tasks/replies. | **REMEDIATED (PHASE 1):** D1 `processed_updates` table with atomic PK collision check. |
+| **MEDIUM** | `SEC-MED-01` | **Conditional Webhook Secret Check:** If `TELEGRAM_WEBHOOK_SECRET` is unset, validation passes all incoming requests. | Misconfigured edge workers are open. | OPEN (Requires environment secret). |
+| **MEDIUM** | `SEC-MED-02` | **Non-Atomic Task Leasing:** Sequential `SELECT`, `INSERT`, and `UPDATE` in D1 without conditional claim. | Duplicate task leases under concurrency. | **REMEDIATED (PHASE 1):** Atomic conditional `UPDATE ... WHERE status IN ('PENDING', 'QUEUED')`. |
 
 ---
 

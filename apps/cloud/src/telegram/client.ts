@@ -1,3 +1,5 @@
+import { SecretRedactor } from '@lucifer/security';
+
 export interface SendMessageOptions {
   parse_mode?: 'Markdown' | 'HTML';
   reply_markup?: {
@@ -19,12 +21,13 @@ export class TelegramBotClient {
     text: string,
     options?: SendMessageOptions
   ): Promise<any> {
+    const sanitized = SecretRedactor.redact(text);
     const MAX_LEN = 4000;
     // Paginate if message exceeds Telegram limit
-    if (text.length > MAX_LEN) {
+    if (sanitized.length > MAX_LEN) {
       const chunks = [];
-      for (let i = 0; i < text.length; i += MAX_LEN) {
-        chunks.push(text.slice(i, i + MAX_LEN));
+      for (let i = 0; i < sanitized.length; i += MAX_LEN) {
+        chunks.push(sanitized.slice(i, i + MAX_LEN));
       }
 
       let lastResult;
@@ -42,7 +45,7 @@ export class TelegramBotClient {
 
     return this.postRequest('/sendMessage', {
       chat_id: chatId,
-      text,
+      text: sanitized,
       parse_mode: options?.parse_mode,
       reply_markup: options?.reply_markup
     });
@@ -54,10 +57,11 @@ export class TelegramBotClient {
     text: string,
     options?: SendMessageOptions
   ): Promise<any> {
+    const sanitized = SecretRedactor.redact(text);
     return this.postRequest('/editMessageText', {
       chat_id: chatId,
       message_id: messageId,
-      text,
+      text: sanitized,
       parse_mode: options?.parse_mode,
       reply_markup: options?.reply_markup
     });

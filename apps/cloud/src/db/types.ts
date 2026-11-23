@@ -15,5 +15,6 @@ export interface CloudEnv {
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
   OLLAMA_URL?: string;
+  DEVICE_PAIRING_SECRET?: string;
   AI?: any; // Cloudflare Workers AI binding if present
 }

@@ -1,4 +1,4 @@
-import { TelegramAuthGuard } from '@lucifer/security';
+import { TelegramAuthGuard, DeviceAuthGuard, SecretRedactor, SlidingWindowRateLimiter } from '@lucifer/security';
 import {
   GeminiProvider,
   GroqProvider,
@@ -14,6 +14,10 @@ import { TelegramBotClient } from './telegram/client';
 import { TelegramCommandHandler } from './telegram/handlers';
 import { TelegramOrchestrator } from './telegram/orchestrator';
 import { SchedulerService } from './services/scheduler-service';
+
+// Isolate-local sliding window rate limiters (protects against burst traffic within Worker isolate)
+const webhookRateLimiter = new SlidingWindowRateLimiter(60, 60000); // 60 req/min
+const agentRateLimiter = new SlidingWindowRateLimiter(60, 60000);   // 60 req/min
 
 export default {
   async fetch(request: Request, env: CloudEnv, ctx: ExecutionContext): Promise<Response> {
@@ -36,6 +40,16 @@ export default {
 
     // 1. Telegram Webhook Handler
     if (url.pathname === '/webhook/telegram' && request.method === 'POST') {
+      // Edge rate limiting: 60 requests per minute per IP / sender
+      const clientIp = request.headers.get('CF-Connecting-IP') || 'telegram-peer';
+      const rateCheck = webhookRateLimiter.isAllowed(clientIp);
+      if (!rateCheck.allowed) {
+        return new Response('Too Many Requests', {
+          status: 429,
+          headers: { 'Retry-After': String(Math.ceil(rateCheck.retryAfterMs / 1000)) }
+        });
+      }
+
       const authGuard = new TelegramAuthGuard({
         ownerId: env.TELEGRAM_OWNER_ID || '',
         webhookSecret: env.TELEGRAM_WEBHOOK_SECRET
@@ -55,6 +69,17 @@ export default {
         update = await request.json();
       } catch {
         return new Response('Bad Request', { status: 400 });
+      }
+
+      // Atomic Update Deduplication
+      if (update && typeof update.update_id === 'number') {
+        const isNew = await repo.markUpdateProcessed(update.update_id);
+        if (!isNew) {
+          await repo.logAudit(String(update.message?.from?.id || 'unknown'), 'DUPLICATE_UPDATE_IGNORED', undefined, 'FLAGGED', 'TIER_0_READ_ONLY', {
+            updateId: update.update_id
+          });
+          return new Response('OK', { status: 200 });
+        }
       }
 
       const bot = new TelegramBotClient(env.TELEGRAM_BOT_TOKEN || '');
@@ -144,16 +169,81 @@ export default {
       return new Response('OK', { status: 200 });
     }
 
-    // 2. Local Mac Agent Endpoints (Outbound HTTPS Polling)
-    if (url.pathname === '/api/agent/heartbeat' && request.method === 'POST') {
-      const body = (await request.json()) as any;
-      if (!body.deviceId) return new Response('Missing deviceId', { status: 400 });
+    // 2. Local Mac Agent Endpoints (Outbound HTTPS Polling with Device Authentication)
+    // Device Pairing Endpoint
+    if (url.pathname === '/api/agent/pair' && request.method === 'POST') {
+      const body = (await request.json().catch(() => ({}))) as any;
+      if (!body.deviceId || !body.deviceName) {
+        return new Response(JSON.stringify({ error: 'Missing deviceId or deviceName' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+
+      const pairingToken = (body.pairingToken || '').trim();
+      const expectedPairingSecret = (env.DEVICE_PAIRING_SECRET || env.TELEGRAM_WEBHOOK_SECRET || '').trim();
+      if (!expectedPairingSecret || pairingToken !== expectedPairingSecret) {
+        await repo.logAudit(undefined, 'DEVICE_PAIRING_ATTEMPT', body.deviceId, 'DENIED', 'TIER_3_DANGEROUS');
+        return new Response(JSON.stringify({ error: 'Invalid pairing token' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+
+      // Generate a secure 32-byte hex token for this device
+      const tokenBytes = new Uint8Array(32);
+      crypto.getRandomValues(tokenBytes);
+      const rawDeviceToken = Array.from(tokenBytes).map((b) => b.toString(16).padStart(2, '0')).join('');
+      const hashedToken = await DeviceAuthGuard.hashToken(rawDeviceToken);
 
       await repo.upsertDevice(
         body.deviceId,
-        body.ownerId || env.TELEGRAM_OWNER_ID || 'default_owner',
+        env.TELEGRAM_OWNER_ID || 'default_owner',
+        body.deviceName,
+        hashedToken,
+        JSON.stringify(body.info || {})
+      );
+
+      await repo.logAudit(env.TELEGRAM_OWNER_ID, 'DEVICE_PAIRED', body.deviceId, 'SUCCESS', 'TIER_2_SENSITIVE');
+
+      return new Response(JSON.stringify({ status: 'paired', deviceId: body.deviceId, token: rawDeviceToken }), {
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Helper to authenticate agent requests
+    const authenticateAgent = async (deviceId: string): Promise<{ authorized: boolean; ownerId?: string }> => {
+      const authHeader = request.headers.get('Authorization');
+      const customHeader = request.headers.get('X-Device-Token');
+      const token = DeviceAuthGuard.extractToken(authHeader, customHeader);
+      return repo.checkDeviceAuth(deviceId, token);
+    };
+
+    if (url.pathname === '/api/agent/heartbeat' && request.method === 'POST') {
+      const body = (await request.json().catch(() => ({}))) as any;
+      if (!body.deviceId) return new Response('Missing deviceId', { status: 400 });
+
+      // Rate limit check
+      const rateCheck = agentRateLimiter.isAllowed(body.deviceId);
+      if (!rateCheck.allowed) {
+        return new Response('Too Many Requests', {
+          status: 429,
+          headers: { 'Retry-After': String(Math.ceil(rateCheck.retryAfterMs / 1000)) }
+        });
+      }
+
+      // Authenticate device credentials
+      const auth = await authenticateAgent(body.deviceId);
+      if (!auth.authorized) {
+        await repo.logAudit(undefined, 'AGENT_HEARTBEAT_UNAUTHORIZED', body.deviceId, 'DENIED', 'TIER_3_DANGEROUS');
+        return new Response('Unauthorized', { status: 401 });
+      }
+
+      await repo.upsertDevice(
+        body.deviceId,
+        auth.ownerId || env.TELEGRAM_OWNER_ID || 'default_owner',
         body.deviceName || 'MacBook',
-        body.authSecretHash || 'default_hash',
+        '', // Do not overwrite existing secret hash
         JSON.stringify(body.info || {})
       );
 
@@ -163,8 +253,24 @@ export default {
     }
 
     if (url.pathname === '/api/agent/poll' && request.method === 'POST') {
-      const body = (await request.json()) as any;
+      const body = (await request.json().catch(() => ({}))) as any;
       if (!body.deviceId) return new Response('Missing deviceId', { status: 400 });
+
+      // Rate limit check
+      const rateCheck = agentRateLimiter.isAllowed(body.deviceId);
+      if (!rateCheck.allowed) {
+        return new Response('Too Many Requests', {
+          status: 429,
+          headers: { 'Retry-After': String(Math.ceil(rateCheck.retryAfterMs / 1000)) }
+        });
+      }
+
+      // Authenticate device credentials
+      const auth = await authenticateAgent(body.deviceId);
+      if (!auth.authorized) {
+        await repo.logAudit(undefined, 'AGENT_POLL_UNAUTHORIZED', body.deviceId, 'DENIED', 'TIER_3_DANGEROUS');
+        return new Response('Unauthorized', { status: 401 });
+      }
 
       const task = await repo.leaseNextLocalTask(body.deviceId);
       return new Response(JSON.stringify({ task: task || null }), {
@@ -173,8 +279,22 @@ export default {
     }
 
     if (url.pathname === '/api/agent/result' && request.method === 'POST') {
-      const body = (await request.json()) as any;
-      if (!body.taskId) return new Response('Missing taskId', { status: 400 });
+      const body = (await request.json().catch(() => ({}))) as any;
+      if (!body.taskId || !body.deviceId) return new Response('Missing taskId or deviceId', { status: 400 });
+
+      // Authenticate device credentials
+      const auth = await authenticateAgent(body.deviceId);
+      if (!auth.authorized) {
+        await repo.logAudit(undefined, 'AGENT_RESULT_UNAUTHORIZED', body.deviceId, 'DENIED', 'TIER_3_DANGEROUS');
+        return new Response('Unauthorized', { status: 401 });
+      }
+
+      // Verify that this device actually holds the active lease for this task
+      const ownsLease = await repo.verifyTaskOwnership(body.taskId, body.deviceId);
+      if (!ownsLease) {
+        await repo.logAudit(body.deviceId, 'AGENT_RESULT_LEASE_MISMATCH', body.taskId, 'DENIED', 'TIER_3_DANGEROUS');
+        return new Response('Forbidden: Task lease not held by this device', { status: 403 });
+      }
 
       const finalStatus = body.success ? 'COMPLETED' : 'FAILED';
       await repo.updateTaskStatus(

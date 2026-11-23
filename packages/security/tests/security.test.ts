@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   TelegramAuthGuard,
+  DeviceAuthGuard,
   SsrfFilter,
   SecretRedactor,
   PromptInjectionDefense,
@@ -36,6 +37,35 @@ describe('TelegramAuthGuard', () => {
     expect(guard.validateWebhookSecret('wrong-token')).toBe(false);
     expect(guard.validateWebhookSecret(null)).toBe(false);
     expect(guard.validateWebhookSecret('')).toBe(false);
+  });
+});
+
+describe('DeviceAuthGuard', () => {
+  it('hashes token using sha256 hex string', async () => {
+    const hash = await DeviceAuthGuard.hashToken('my-device-secret-123');
+    expect(hash).toHaveLength(64); // 32 bytes hex
+    const hash2 = await DeviceAuthGuard.hashToken('my-device-secret-123');
+    expect(hash).toBe(hash2);
+  });
+
+  it('verifies valid token against hash in constant time', async () => {
+    const raw = 'macbook-token-xyz-456';
+    const hash = await DeviceAuthGuard.hashToken(raw);
+
+    const isValid = await DeviceAuthGuard.verifyToken(raw, hash);
+    expect(isValid).toBe(true);
+
+    const isInvalid = await DeviceAuthGuard.verifyToken('wrong-token', hash);
+    expect(isInvalid).toBe(false);
+
+    expect(await DeviceAuthGuard.verifyToken(null, hash)).toBe(false);
+  });
+
+  it('extracts bearer token from authorization or custom headers', () => {
+    expect(DeviceAuthGuard.extractToken('Bearer secret-token-123')).toBe('secret-token-123');
+    expect(DeviceAuthGuard.extractToken('bearer secret-token-123')).toBe('secret-token-123');
+    expect(DeviceAuthGuard.extractToken(null, 'custom-token-xyz')).toBe('custom-token-xyz');
+    expect(DeviceAuthGuard.extractToken(undefined)).toBeNull();
   });
 });
 

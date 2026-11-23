@@ -4,6 +4,7 @@ import {
   TaskRecord
 } from '@lucifer/shared-types';
 import { BUILTIN_TOOLS, ToolPermissionGuard, ToolLoopGuard } from '@lucifer/tool-contracts';
+import { SecretRedactor } from '@lucifer/security';
 import { ModelRouter } from '@lucifer/provider-registry';
 import { LuciferDbRepository } from '../db/repository';
 import { TelegramBotClient } from './client';
@@ -182,7 +183,7 @@ Do you authorize Lucifer to perform this operation?
         return;
       }
     } catch (err: any) {
-      await this.bot.sendMessage(chatId, `⚠️ Lucifer encountered an error: ${err.message}`);
+      await this.bot.sendMessage(chatId, SecretRedactor.redact(`⚠️ Lucifer encountered an error: ${err.message}`));
     }
   }
 

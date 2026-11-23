@@ -1,4 +1,5 @@
 import { ApprovalRecord, TaskRecord } from '@lucifer/shared-types';
+import { DeviceAuthGuard } from '@lucifer/security';
 
 export class LuciferDbRepository {
   private db: D1Database;
@@ -276,51 +277,100 @@ export class LuciferDbRepository {
         ON CONFLICT(device_id) DO UPDATE SET
           last_heartbeat = ?,
           device_info = COALESCE(?, device_info),
+          auth_secret_hash = CASE WHEN ? != '' THEN ? ELSE auth_secret_hash END,
           is_active = 1`)
-      .bind(deviceId, ownerId, deviceName, authSecretHash, now, infoJson || null, now, now, infoJson || null)
+      .bind(deviceId, ownerId, deviceName, authSecretHash, now, infoJson || null, now, now, infoJson || null, authSecretHash, authSecretHash)
       .run();
   }
 
+  /**
+   * Validates device authentication against stored SHA-256 hash
+   */
+  public async checkDeviceAuth(
+    deviceId: string,
+    presentedToken: string | null | undefined
+  ): Promise<{ authorized: boolean; ownerId?: string }> {
+    if (!deviceId || !presentedToken) {
+      return { authorized: false };
+    }
+
+    const device = await this.db
+      .prepare('SELECT device_id, owner_id, auth_secret_hash, is_active FROM devices WHERE device_id = ?')
+      .bind(deviceId)
+      .first<{ device_id: string; owner_id: string; auth_secret_hash: string; is_active: number }>();
+
+    if (!device || device.is_active !== 1) {
+      return { authorized: false };
+    }
+
+    const isValid = await DeviceAuthGuard.verifyToken(presentedToken, device.auth_secret_hash);
+    if (!isValid) {
+      return { authorized: false };
+    }
+
+    return { authorized: true, ownerId: device.owner_id };
+  }
+
+  /**
+   * Verifies if a given device currently holds the lease for a task
+   */
+  public async verifyTaskOwnership(taskId: string, deviceId: string): Promise<boolean> {
+    const lease = await this.db
+      .prepare('SELECT task_id, device_id FROM task_leases WHERE task_id = ? AND device_id = ?')
+      .bind(taskId, deviceId)
+      .first<{ task_id: string; device_id: string }>();
+
+    return Boolean(lease);
+  }
+
+  /**
+   * Atomically records update_id to prevent duplicate update execution
+   */
+  public async markUpdateProcessed(updateId: number): Promise<boolean> {
+    try {
+      await this.db
+        .prepare('INSERT INTO processed_updates (update_id, processed_at) VALUES (?, ?)')
+        .bind(updateId, Date.now())
+        .run();
+      return true;
+    } catch {
+      // Primary key constraint collision means duplicate update
+      return false;
+    }
+  }
+
+  /**
+   * Atomically leases the next available task using a conditional UPDATE
+   */
   public async leaseNextLocalTask(deviceId: string): Promise<TaskRecord | null> {
     const now = Date.now();
-    const taskRow = await this.db
-      .prepare(`SELECT * FROM tasks
+    const candidate = await this.db
+      .prepare(`SELECT id FROM tasks
         WHERE execution_target = 'LOCAL_MAC'
           AND status IN ('PENDING', 'QUEUED')
         ORDER BY priority = 'CRITICAL' DESC, priority = 'HIGH' DESC, created_at ASC
         LIMIT 1`)
-      .first<any>();
+      .first<{ id: string }>();
 
-    if (!taskRow) return null;
+    if (!candidate) return null;
+
+    // Atomic conditional status transition
+    const updateResult = await this.db
+      .prepare("UPDATE tasks SET status = 'RUNNING', updated_at = ? WHERE id = ? AND status IN ('PENDING', 'QUEUED')")
+      .bind(now, candidate.id)
+      .run();
+
+    if (!updateResult.meta || updateResult.meta.changes === 0) {
+      return null;
+    }
 
     const leaseExpires = now + 60000; // 60-second lease
     await this.db
       .prepare('INSERT OR REPLACE INTO task_leases (task_id, device_id, leased_at, expires_at) VALUES (?, ?, ?, ?)')
-      .bind(taskRow.id, deviceId, now, leaseExpires)
+      .bind(candidate.id, deviceId, now, leaseExpires)
       .run();
 
-    await this.db
-      .prepare("UPDATE tasks SET status = 'RUNNING', updated_at = ? WHERE id = ?")
-      .bind(now, taskRow.id)
-      .run();
-
-    return {
-      id: taskRow.id,
-      ownerId: taskRow.owner_id,
-      description: taskRow.description,
-      type: taskRow.type,
-      priority: taskRow.priority,
-      status: 'RUNNING',
-      executionTarget: 'LOCAL_MAC',
-      requiredTools: JSON.parse(taskRow.required_tools || '[]'),
-      progress: taskRow.progress,
-      retries: taskRow.retries,
-      maxRetries: taskRow.max_retries,
-      correlationId: taskRow.correlation_id,
-      payload: taskRow.payload ? JSON.parse(taskRow.payload) : undefined,
-      createdAt: taskRow.created_at,
-      updatedAt: now
-    };
+    return this.getTask(candidate.id);
   }
 
   // Audit Logs
