@@ -1,0 +1,27 @@
+{
+  "name": "@lucifer/cloud",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./src/index.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply lucifer-db --local",
+    "db:migrate:prod": "wrangler d1 migrations apply lucifer-db --remote"
+  },
+  "dependencies": {
+    "@lucifer/shared-types": "workspace:*",
+    "@lucifer/security": "workspace:*",
+    "@lucifer/tool-contracts": "workspace:*",
+    "@lucifer/provider-registry": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250204.0",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5",
+    "wrangler": "^3.107.3"
+  }
+}

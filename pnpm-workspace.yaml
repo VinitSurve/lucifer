@@ -1,0 +1,9 @@
+packages:
+  - 'packages/*'
+  - 'apps/cloud'
+  - 'apps/cli'
+
+allowBuilds:
+  esbuild: true
+  sharp: true
+  workerd: true

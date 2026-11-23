@@ -1,0 +1,18 @@
+{
+  "name": "lucifer-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Lucifer - Private AI Command Center",
+  "scripts": {
+    "build": "pnpm -r --filter './packages/**' --filter './apps/**' run build",
+    "test": "pnpm -r run test",
+    "typecheck": "pnpm -r run typecheck",
+    "lint": "pnpm -r run lint",
+    "dev:cloud": "pnpm --filter @lucifer/cloud dev",
+    "doctor": "pnpm --filter @lucifer/cli run start doctor"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  }
+}

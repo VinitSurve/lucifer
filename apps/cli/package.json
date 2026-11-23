@@ -1,0 +1,21 @@
+{
+  "name": "@lucifer/cli",
+  "version": "0.1.0",
+  "bin": {
+    "lucifer": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@lucifer/shared-types": "workspace:*",
+    "@lucifer/security": "workspace:*",
+    "@lucifer/provider-registry": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.1",
+    "typescript": "^5.7.3"
+  }
+}

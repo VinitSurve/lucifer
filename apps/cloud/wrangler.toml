@@ -1,0 +1,22 @@
+name = "lucifer-cloud"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+LUCIFER_ENV = "development"
+DEFAULT_TIMEZONE = "Asia/Kolkata"
+BUDGET_MODE = "FREE_ONLY"
+
+# Cloudflare D1 Database binding
+[[d1_databases]]
+binding = "DB"
+database_name = "lucifer-db"
+database_id = "local-lucifer-d1"
+migrations_dir = "migrations"
+
+# Cron Triggers (UTC)
+# - 02:00 UTC = 07:30 AM IST (Daily Morning Briefing)
+# - Every 15 minutes = background tasks & heartbeat check
+[triggers]
+crons = ["0 2 * * *", "*/15 * * * *"]

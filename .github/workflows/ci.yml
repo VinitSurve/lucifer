@@ -1,0 +1,51 @@
+name: Lucifer CI Pipeline
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test-and-build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.9.1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: 'latest'
+
+      - name: Install Monorepo Dependencies
+        run: |
+          pnpm approve-builds --all
+          pnpm install
+
+      - name: Build TypeScript Packages & Cloud Worker
+        run: pnpm build
+
+      - name: Run TypeScript Tests
+        run: pnpm test
+
+      - name: Run Python Agent Tests
+        run: |
+          cd apps/local-agent
+          uv run pytest
