@@ -8,6 +8,9 @@ Lucifer is a private, multi-model personal assistant and autonomous agent access
 
 ## ⚡ Key Highlights
 
+> [!NOTE]
+> **Reality Audit Notice:** For a complete, skeptical breakdown of implemented features, mock stubs, and security findings, see [AUDIT_REPORT.md](file:///Users/vinit/Vinit/Lucifer/AUDIT_REPORT.md) and [INTEGRATION_STATUS.md](file:///Users/vinit/Vinit/Lucifer/INTEGRATION_STATUS.md).
+
 - **Telegram Interface:** Full personal command center with commands, inline buttons, confirmation dialogs, and natural conversation.
 - **Hybrid Cloudflare + macOS:**
   - **Cloud:** Cloudflare Workers, D1 SQL Database, and Cron Triggers. Runs 24/7 at $0 cost.
