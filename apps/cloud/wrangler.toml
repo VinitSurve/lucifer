@@ -20,3 +20,23 @@ migrations_dir = "migrations"
 # - Every 15 minutes = background tasks & heartbeat check
 [triggers]
 crons = ["0 2 * * *", "*/15 * * * *"]
+
+# =============================================================================
+# STAGING ENVIRONMENT (ISOLATED)
+# =============================================================================
+[env.staging]
+name = "lucifer-staging"
+
+[env.staging.vars]
+LUCIFER_ENV = "staging"
+DEFAULT_TIMEZONE = "Asia/Kolkata"
+BUDGET_MODE = "FREE_ONLY"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "lucifer-staging-db"
+database_id = "local-lucifer-staging-d1"
+migrations_dir = "migrations"
+
+[env.staging.triggers]
+crons = ["0 2 * * *", "*/15 * * * *"]
