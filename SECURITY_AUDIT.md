@@ -88,3 +88,43 @@ This security audit was conducted by inspecting the source code and testing atta
 | Local Agent Endpoint Auth & Pairing | `apps/cloud/src/index.ts` & `packages/security/src/device-auth.ts` | **ACTIVE & VERIFIED (PHASE 2: Anti-hijacking 409, rotation/revocation, IP rate limit, no webhook fallback)** |
 | Telegram Update Deduplication | `apps/cloud/migrations/0003_phase2_security_hardening.sql` & `apps/cloud/src/index.ts` | **ACTIVE & VERIFIED (PHASE 2: Durable state machine PROCESSING -> COMPLETED/FAILED)** |
 | Task Lease Expiry Reaper | `apps/cloud/src/db/repository.ts` | **ACTIVE & VERIFIED (PHASE 2: Auto-reclaim expired RUNNING tasks, unexpired 403 enforcement)** |
+
+---
+
+## 3. Phase 3 & Phase 4 Security Audit & Remediation (November 23, 2026)
+
+An independent Phase 3 security verification identified 4 confirmed vulnerabilities and 2 quality/architectural findings, which were systematically remediated in Phase 4:
+
+### [P3-SEC-01] Arbitrary Host Binary Execution via Executable Path Substitution [REMEDIATED - PHASE 4]
+- **Severity:** **CRITICAL**
+- **Location:** `apps/local-agent/src/lucifer_agent/executor.py`
+- **Vulnerability:** `cmd_name = Path(command).name` validated basename against `{"git", "echo", "ls"}`, but `subprocess.run([command] + args)` executed the unvalidated user path. Supplying `/path/to/malicious/echo` or `./echo` executed arbitrary scripts on the host.
+- **Remediation:** Enforced strict alphanumeric command identifier validation (`^[a-zA-Z0-9_-]+$`). Rejected all path separators, slashes, and traversal characters. Replaced host subprocess execution for `echo` and `ls` with safe, native Python implementations. Bound `git` strictly to verified system binary paths (`/usr/bin/git`, `/usr/local/bin/git`, `/opt/homebrew/bin/git`). Completely removed user-supplied `subprocess.run()` invocations. Verified with adversarial tests.
+
+### [P3-SEC-02] Case-Insensitive Filesystem Denylist Bypass on macOS (APFS) [REMEDIATED - PHASE 4]
+- **Severity:** **HIGH**
+- **Location:** `apps/local-agent/src/lucifer_agent/executor.py` & `packages/tool-contracts/src/definitions.ts`
+- **Vulnerability:** APFS is case-insensitive, but `SENSITIVE_FILE_PATTERNS` regexes lacked `re.IGNORECASE`, allowing `.ENV` and `WRANGLER.TOML` to be read. Denylist also lacked `.envrc` and `.git-credentials`.
+- **Remediation:** Added `re.IGNORECASE` to all sensitive patterns. Expanded patterns to cover `.envrc`, `.git-credentials`, `.netrc`, `.npmrc`, `.pypirc`, `.docker/config.json`, `.aws`, `.gcloud`, `.azure`, and SSH private keys. Implemented file-descriptor `fstat()` verification to mitigate TOCTOU race conditions. Elevated `mac_read_file` to `TIER_1_LOW_RISK`. Verified with 31 test cases.
+
+### [P3-DEP-01] D1 Migration Collision on Clean Deployment [REMEDIATED - PHASE 4]
+- **Severity:** **MEDIUM — DEPLOYMENT BLOCKER**
+- **Location:** `apps/cloud/migrations/0001_initial_schema.sql` & `0003_phase2_security_hardening.sql`
+- **Vulnerability:** `0001_initial_schema.sql` was retroactively edited to define `status`, `updated_at`, `error` on `processed_updates`. Sequential execution of `0003` failed with SQLite fatal error: `duplicate column name: status`.
+- **Remediation:** Restored `0001_initial_schema.sql` to its authentic initial schema baseline. Verified clean sequential migrations (`0001 -> 0002 -> 0003`) on fresh databases and validated data preservation on existing databases using real SQLite (`node:sqlite`).
+
+### [P3-SEC-03] Untrusted Web Search Content Handling [REMEDIATED - PHASE 4]
+- **Severity:** **MEDIUM**
+- **Location:** `apps/cloud/src/telegram/orchestrator.ts`
+- **Vulnerability:** Web search snippets from DuckDuckGo were passed as raw JSON to model context without defensive delimiter tags.
+- **Remediation:** Wrapped web search results in `PromptInjectionDefense.wrapUntrustedContent('web_search', JSON.stringify(results))` with security notice and delimiter escape sanitization.
+
+### [P3-ARCH-01] Isolate-Local Rate Limiting [DOCUMENTED]
+- **Severity:** **LOW / ARCHITECTURAL**
+- **Finding:** In-memory rate limits are local to individual Cloudflare Worker isolates. Multi-colo distributed traffic is not globally synchronized.
+- **Recommendation:** Documented requirement to enable Cloudflare WAF Rate Limiting Rules in the Cloudflare Dashboard for production exposure.
+
+### [P3-QA-01] Mocked D1 Tests Failing to Catch Migration Issues [REMEDIATED - PHASE 4]
+- **Severity:** **LOW / QA RIGOR**
+- **Finding:** Unit tests previously mocked D1 with JavaScript string matching rather than executing a real SQLite database.
+- **Remediation:** Added `apps/cloud/tests/sqlite-migrations.test.ts` executing all migrations and repository operations against native Node `node:sqlite`.

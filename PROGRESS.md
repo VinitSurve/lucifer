@@ -1,6 +1,6 @@
 # Lucifer Implementation Progress
 
-## Active Phase: 15 - Security Hardening Phase 2 Complete
+## Active Phase: 16 - Phase 3 Verification & Phase 4 Security Remediation Complete
 
 - [x] Initialized Git repository and monorepo structure
 - [x] Created root configuration (pnpm workspace, base tsconfig, .env.example)
@@ -16,12 +16,12 @@
 - [x] Conducted independent Reality Audit (`AUDIT_REPORT.md` & `SECURITY_AUDIT.md`)
 - [x] Completed Phase 1 Security Remediation (`SECURITY_REMEDIATION.md`)
 - [x] Conducted Phase 1.5 Adversarial Security Verification (`SECURITY_VERIFICATION_PHASE_1_5.md`)
-- [x] Completed Phase 2 Security Hardening:
-  - [x] Checkpoint A: Purged host interpreters/npm/pytest, introduced capability-based executor, safe Git overrides, Docker isolation provider
-  - [x] Checkpoint B: Hardened device pairing (IP rate limit, no webhook fallback, anti-hijacking 409, rotation/revocation endpoints)
-  - [x] Checkpoint C: Task lease lifecycle (auto-reclaim expired leases, unexpired lease check 403, renewal endpoint, idempotent results)
-  - [x] Checkpoint D: Durable Telegram update processing state machine (PROCESSING -> COMPLETED/FAILED, eliminate message loss window)
-  - [x] Checkpoint E: Bounded rate limiting (maxKeys=1000 with LRU eviction, IP rate limit on pairing & agent routes)
-  - [x] Checkpoint F: Secret hygiene (expanded redactor for hex/CF/OAuth/DB passwords, pre-persistence D1 sanitization)
-- [x] Authored comprehensive `SECURITY_HARDENING_PHASE_2.md`
-- [x] Ran complete test suite (58/58 tests passed: 45 Vitest + 13 Pytest, 0 failed, 0 skipped)
+- [x] Completed Phase 2 Security Hardening (`SECURITY_HARDENING_PHASE_2.md`)
+- [x] Conducted Phase 3 Independent Security Verification (`SECURITY_VERIFICATION_PHASE_3.md`)
+- [x] Completed Phase 4 Security Remediation (`SECURITY_REMEDIATION_PHASE_4.md`):
+  - [x] Fix P3-SEC-01: Eliminated host executable path substitution; replaced echo/ls with Python-native logic; pinned git to verified system binary
+  - [x] Fix P3-SEC-02: Added case-insensitive APFS matching (`re.IGNORECASE`), expanded sensitive files denylist (.envrc, .git-credentials, etc.), TOCTOU fstat checks, elevated mac_read_file to Tier 1
+  - [x] Fix P3-DEP-01: Restored 0001 initial schema baseline to resolve D1 migration duplicate column error; verified sequential migrations 0001->0002->0003
+  - [x] Fix P3-SEC-03: Wrapped web search results in PromptInjectionDefense envelope with assistant security notice
+  - [x] Fix P3-QA-01: Added real SQLite engine integration tests (`node:sqlite`) for migrations and D1 repository operations
+- [x] Ran complete test suite (66/66 tests passed: 50 Vitest + 16 Pytest, 0 failed, 0 skipped)
