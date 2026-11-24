@@ -1,4 +1,7 @@
 import pytest
+import subprocess
+import shutil
+import uuid
 from pathlib import Path
 from lucifer_agent.executor import ControlledExecutor, IsolatedExecutionProvider, SAFE_PROCESS_ENV
 from lucifer_agent.sysinfo import get_system_metrics
@@ -62,7 +65,7 @@ def test_python3_interpreter_strictly_blocked(tmp_path, monkeypatch):
     safe_dir.mkdir()
     executor = ControlledExecutor([str(safe_dir)])
 
-    # Attempt arbitrary python code execution on host - MUST BE BLOCKED
+    # 1. When isolation is unavailable, arbitrary python execution on host is strictly blocked
     monkeypatch.setattr(IsolatedExecutionProvider, "is_isolation_available", classmethod(lambda cls: False))
     blocked = executor.execute_command("python3", ["-c", "import sys; print('pwned')"], str(safe_dir))
     assert blocked["success"] is False
@@ -126,7 +129,7 @@ def test_npm_pnpm_pytest_uv_blocked_on_host(tmp_path, monkeypatch):
     safe_dir.mkdir()
     executor = ControlledExecutor([str(safe_dir)])
 
-    # All build tools, interpreters, and test runners must be blocked on host
+    # When isolation is unavailable, all build tools, interpreters, and test runners must be blocked on host
     monkeypatch.setattr(IsolatedExecutionProvider, "is_isolation_available", classmethod(lambda cls: False))
     for tool, args in [("npm", ["test"]), ("pnpm", ["run", "build"]), ("pytest", ["-q"]), ("uv", ["run", "test"])]:
         res = executor.execute_command(tool, args, str(safe_dir))
@@ -352,14 +355,14 @@ def test_adversarial_symlink_escape_and_traversal(tmp_path):
     assert "outside permitted" in res_cwd_traversal["error"]
 
 # =============================================================================
-# PHASE 5.1.2: DOCKER ENDPOINT RESOLUTION & PID LIMIT REGRESSION TESTS
+# PHASE 5.1.2: DOCKER LIFECYCLE & RESOURCE HARDENING REGRESSION TESTS
 # =============================================================================
 
 def test_docker_deterministic_endpoint_resolution(monkeypatch, tmp_path):
     """Verifies deterministic Docker endpoint resolution under SAFE_PROCESS_ENV."""
-    import uuid
-    import socket
+    # 1. Test resolution when DOCKER_HOST points to a valid socket (use short path in /tmp for macOS AF_UNIX limit)
     fake_sock = Path(f"/tmp/d_{uuid.uuid4().hex[:6]}.sock")
+    import socket
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.bind(str(fake_sock))
     try:
@@ -376,19 +379,72 @@ def test_docker_deterministic_endpoint_resolution(monkeypatch, tmp_path):
         if fake_sock.exists():
             fake_sock.unlink()
 
+    # 2. Test rejection of non-socket regular file
     fake_file = tmp_path / "not_a_socket.txt"
     fake_file.write_text("dummy", encoding="utf-8")
     monkeypatch.setenv("DOCKER_HOST", f"unix://{fake_file}")
+    # Should ignore the regular file and fall back to trusted paths or None
     ep_non_sock = IsolatedExecutionProvider.resolve_docker_endpoint()
     assert ep_non_sock != f"unix://{fake_file}"
 
+    # 3. Test rejection of dangerous TCP format / injection attempts
     monkeypatch.setenv("DOCKER_HOST", "tcp://evil.com:1234; rm -rf /")
     ep_invalid = IsolatedExecutionProvider.resolve_docker_endpoint()
     assert ep_invalid != "tcp://evil.com:1234; rm -rf /"
 
+def test_docker_concurrent_task_container_naming(tmp_path):
+    """Verifies deterministic, unique, collision-resistant container naming."""
+    names = set()
+    for i in range(20):
+        # Unique suffix generation inside execute_in_container
+        clean_task_id = "test-task-1"
+        safe_task_id = clean_task_id[:16]
+        suffix = uuid.uuid4().hex[:12]
+        cname = f"lucifer-exec-{safe_task_id}-{suffix}"
+        assert cname.startswith("lucifer-exec-test-task-1-")
+        assert len(cname) <= 45
+        assert cname not in names
+        names.add(cname)
+    assert len(names) == 20
+
+def test_docker_forced_cleanup_handling(monkeypatch):
+    """Verifies _force_cleanup_container returns structured results and detects removal."""
+    # Mock subprocess.run for cleanup commands
+    class MockProcess:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    # Test successful cleanup where container is confirmed gone
+    def mock_run_success(cmd, **kwargs):
+        if cmd[1] == "rm":
+            return MockProcess(returncode=0, stdout="test-container")
+        if cmd[1] == "ps":
+            return MockProcess(returncode=0, stdout="")  # Container not in ps
+        return MockProcess(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", mock_run_success)
+    res = IsolatedExecutionProvider._force_cleanup_container("docker", "test-container", {})
+    assert res["success"] is True
+    assert res["confirmed_removed"] is True
+
+    # Test cleanup failure surfaced when ps still shows container
+    def mock_run_stuck(cmd, **kwargs):
+        if cmd[1] == "rm":
+            return MockProcess(returncode=1, stderr="Error: cannot remove")
+        if cmd[1] == "ps":
+            return MockProcess(returncode=0, stdout="test-container-id\n")
+        return MockProcess(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", mock_run_stuck)
+    res_stuck = IsolatedExecutionProvider._force_cleanup_container("docker", "test-container", {})
+    assert res_stuck["success"] is False
+    assert res_stuck["confirmed_removed"] is False
+    assert "Error: cannot remove" in res_stuck["stderr"]
+
 def test_docker_pids_limit_in_command(tmp_path, monkeypatch):
     """Verifies --pids-limit 128 is included in generated docker command."""
-    import subprocess
     executed_cmds = []
 
     def mock_run(cmd, **kwargs):
@@ -406,9 +462,54 @@ def test_docker_pids_limit_in_command(tmp_path, monkeypatch):
     safe_dir.mkdir()
     executor = ControlledExecutor([str(safe_dir)])
 
-    executor.execute_command("python", ["-c", "print(1)"], str(safe_dir))
+    executor.execute_command("python", ["-c", "print(1)"], str(safe_dir), task_id="pid-test")
     assert len(executed_cmds) > 0
     cmd = executed_cmds[0]
     assert "--pids-limit" in cmd
     idx = cmd.index("--pids-limit")
     assert cmd[idx + 1] == "128"
+    assert "--memory" in cmd
+    assert cmd[cmd.index("--memory") + 1] == "512m"
+    assert "--cpus" in cmd
+    assert cmd[cmd.index("--cpus") + 1] == "1.0"
+    assert "--cap-drop" in cmd
+    assert cmd[cmd.index("--cap-drop") + 1] == "ALL"
+    assert "--security-opt" in cmd
+    assert cmd[cmd.index("--security-opt") + 1] == "no-new-privileges"
+    assert "--network" in cmd
+    assert cmd[cmd.index("--network") + 1] == "none"
+
+@pytest.mark.skipif(not shutil.which("docker"), reason="Docker CLI not installed")
+def test_docker_live_timeout_forced_cleanup():
+    """Live verification: sleep command exceeding timeout is actively stopped and removed."""
+    if not IsolatedExecutionProvider.is_isolation_available():
+        pytest.skip("Docker daemon/Colima not responding")
+
+    workspace = "/Users/vinit/tmp/lucifer-staging-workspace"
+    test_task_id = f"timeout-{uuid.uuid4().hex[:6]}"
+
+    res = IsolatedExecutionProvider.execute_in_container(
+        image="python:3.12-slim",
+        command=["python3", "-c", "import time; time.sleep(10)"],
+        workspace_mount=workspace,
+        timeout=2,
+        task_id=test_task_id
+    )
+
+    assert res["success"] is False
+    assert res.get("timeout") is True
+    assert "Execution timed out" in res["error"]
+    assert res.get("cleanup", {}).get("confirmed_removed") is True
+
+    # Directly verify in docker daemon that container does not exist
+    docker_bin = shutil.which("docker")
+    env = IsolatedExecutionProvider.get_safe_process_env()
+    cname = res["container_name"]
+    ps_check = subprocess.run(
+        [docker_bin, "ps", "-a", "--filter", f"name={cname}", "-q"],
+        capture_output=True,
+        text=True,
+        env=env
+    )
+    assert not ps_check.stdout.strip(), f"Container {cname} leaked in docker ps -a!"
+

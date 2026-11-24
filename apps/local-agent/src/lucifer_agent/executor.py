@@ -2,6 +2,7 @@ import os
 import re
 import json
 import stat
+import uuid
 import shutil
 import subprocess
 from pathlib import Path
@@ -69,27 +70,70 @@ class IsolatedExecutionProvider:
         return env
 
     @classmethod
+    def _force_cleanup_container(cls, docker_bin: str, container_name: str, env: Dict[str, str]) -> Dict[str, Any]:
+        """Forcibly terminates and removes a container on timeout or failure.
+        Confirms that the container is no longer running on the daemon.
+        """
+        try:
+            rm_proc = subprocess.run(
+                [docker_bin, "rm", "-f", container_name],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                env=env
+            )
+            # Verify container is genuinely removed
+            ps_proc = subprocess.run(
+                [docker_bin, "ps", "-a", "--filter", f"name={container_name}", "-q"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                env=env
+            )
+            is_gone = not bool(ps_proc.stdout.strip())
+            return {
+                "success": is_gone,
+                "returncode": rm_proc.returncode,
+                "confirmed_removed": is_gone,
+                "stderr": rm_proc.stderr[:500] if rm_proc.returncode != 0 else ""
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Cleanup failed: {e}",
+                "confirmed_removed": False
+            }
+
+    @classmethod
     def is_isolation_available(cls) -> bool:
         """Detects whether Docker container isolation is available and responsive."""
         docker_bin = shutil.which("docker")
         if not docker_bin:
             return False
         try:
+            env = cls.get_safe_process_env()
             # Check if docker daemon is responding with 2-second timeout
             res = subprocess.run(
                 [docker_bin, "info"],
                 capture_output=True,
                 text=True,
                 timeout=2,
-                env=cls.get_safe_process_env()
+                env=env
             )
             return res.returncode == 0
         except Exception:
             return False
 
     @classmethod
-    def execute_in_container(cls, image: str, command: List[str], workspace_mount: str, timeout: int = 30) -> Dict[str, Any]:
-        """Runs command inside a restricted disposable container."""
+    def execute_in_container(
+        cls,
+        image: str,
+        command: List[str],
+        workspace_mount: str,
+        timeout: int = 30,
+        task_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Runs command inside a restricted disposable container with guaranteed timeout cleanup."""
         if not cls.is_isolation_available():
             return {
                 "success": False,
@@ -97,17 +141,29 @@ class IsolatedExecutionProvider:
             }
 
         docker_bin = shutil.which("docker") or "docker"
+        env = cls.get_safe_process_env()
+
+        # Deterministic unique container name supporting safe concurrency
+        unique_suffix = uuid.uuid4().hex[:12]
+        if task_id:
+            safe_task_id = re.sub(r"[^a-zA-Z0-9_-]", "", task_id)[:16]
+            container_name = f"lucifer-exec-{safe_task_id}-{unique_suffix}"
+        else:
+            container_name = f"lucifer-exec-{unique_suffix}"
+
         docker_cmd = [
-            docker_bin, "run", "--rm",
-            "--user", "1000:1000",            # Non-root user
-            "--network", "none",              # No network by default
-            "--cap-drop", "ALL",              # Drop all Linux capabilities
-            "--security-opt", "no-new-privileges",
-            "--memory", "512m",               # 512MB RAM limit
-            "--cpus", "1.0",                  # 1 CPU core limit
-            "--pids-limit", "128",            # Explicit PID limit to prevent fork bombs
+            docker_bin, "run",
+            "--name", container_name,
+            "--rm",
+            "--user", "1000:1000",                    # Non-root user
+            "--network", "none",                      # Complete network isolation
+            "--cap-drop", "ALL",                      # Drop all Linux capabilities
+            "--security-opt", "no-new-privileges",    # Prevent privilege escalation
+            "--memory", "512m",                       # 512MB RAM cap
+            "--cpus", "1.0",                          # 1 CPU core quota
+            "--pids-limit", "128",                    # Explicit PID limit to prevent fork bombs
             "-v", f"{workspace_mount}:/workspace:ro", # Read-only workspace mount
-            "-w", "/workspace",
+            "-w", "/workspace",                       # Workdir inside container
             image
         ] + command
 
@@ -117,18 +173,32 @@ class IsolatedExecutionProvider:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                env=cls.get_safe_process_env()
+                env=env
             )
             return {
                 "success": proc.returncode == 0,
                 "returncode": proc.returncode,
                 "stdout": proc.stdout[:10000],
-                "stderr": proc.stderr[:5000]
+                "stderr": proc.stderr[:5000],
+                "container_name": container_name
             }
         except subprocess.TimeoutExpired:
-            return {"success": False, "error": f"Execution timed out ({timeout}s limit)"}
+            # Forced cleanup: actively stop and remove the specific task container
+            cleanup_res = cls._force_cleanup_container(docker_bin, container_name, env)
+            return {
+                "success": False,
+                "error": f"Execution timed out ({timeout}s limit)",
+                "timeout": True,
+                "container_name": container_name,
+                "cleanup": cleanup_res
+            }
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            cls._force_cleanup_container(docker_bin, container_name, env)
+            return {
+                "success": False,
+                "error": str(e),
+                "container_name": container_name
+            }
 
 
 class ControlledExecutor:
@@ -451,7 +521,7 @@ class ControlledExecutor:
     # COMMAND EXECUTION ROUTER (Host vs Isolated)
     # =========================================================================
 
-    def execute_command(self, command: str, args: List[str], cwd: str) -> Dict[str, Any]:
+    def execute_command(self, command: str, args: List[str], cwd: str, task_id: Optional[str] = None, timeout: int = 30) -> Dict[str, Any]:
         """Executes a permitted inspection command or routes code execution to isolated container.
         Strictly forbids user-supplied binary paths, path separators, or arbitrary host execution.
         """
@@ -480,7 +550,9 @@ class ControlledExecutor:
                 return IsolatedExecutionProvider.execute_in_container(
                     image="python:3.12-slim" if "py" in cmd_name else "node:20-slim",
                     command=[cmd_name] + args,
-                    workspace_mount=cwd
+                    workspace_mount=cwd,
+                    timeout=timeout,
+                    task_id=task_id
                 )
             return {
                 "success": False,
