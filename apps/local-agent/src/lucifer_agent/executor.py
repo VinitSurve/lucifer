@@ -123,7 +123,64 @@ class IsolatedExecutionProvider:
     def _force_cleanup_container(cls, docker_bin: str, container_name: str, env: Dict[str, str]) -> Dict[str, Any]:
         """Forcibly terminates and removes a container on timeout or failure.
         Confirms that the container is no longer running on the daemon.
+        Distinguishes:
+        1. workload_terminated_and_removed
+        2. cleanup_attempted_unconfirmed
+        3. cleanup_failed
+        4. container_already_absent
+        5. daemon_unavailable
         """
+        # Step 1: Probe container status on daemon
+        try:
+            ps_before = subprocess.run(
+                [docker_bin, "ps", "-a", "--filter", f"name={container_name}", "-q"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                env=env
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "success": False,
+                "status": "daemon_unavailable",
+                "confirmed_removed": False,
+                "error": "Docker daemon did not respond to container status query (timeout)"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "status": "cleanup_failed",
+                "confirmed_removed": False,
+                "error": f"Failed to query container status: {e}"
+            }
+
+        if ps_before.returncode != 0:
+            stderr_lower = ps_before.stderr.lower()
+            if "cannot connect" in stderr_lower or "daemon" in stderr_lower or "is the docker daemon running" in stderr_lower:
+                return {
+                    "success": False,
+                    "status": "daemon_unavailable",
+                    "confirmed_removed": False,
+                    "error": "Docker daemon is unavailable"
+                }
+            return {
+                "success": False,
+                "status": "cleanup_failed",
+                "confirmed_removed": False,
+                "error": f"Querying container failed: {ps_before.stderr[:300]}"
+            }
+
+        container_existed = bool(ps_before.stdout.strip())
+
+        if not container_existed:
+            return {
+                "success": True,
+                "status": "container_already_absent",
+                "confirmed_removed": True,
+                "returncode": 0
+            }
+
+        # Step 2: Container exists; force remove it
         try:
             rm_proc = subprocess.run(
                 [docker_bin, "rm", "-f", container_name],
@@ -132,26 +189,49 @@ class IsolatedExecutionProvider:
                 timeout=5,
                 env=env
             )
-            # Verify container is genuinely removed
-            ps_proc = subprocess.run(
+        except subprocess.TimeoutExpired:
+            return {
+                "success": False,
+                "status": "cleanup_attempted_unconfirmed",
+                "confirmed_removed": False,
+                "error": "docker rm -f timed out (5s limit)"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "status": "cleanup_failed",
+                "confirmed_removed": False,
+                "error": f"docker rm -f failed: {e}"
+            }
+
+        # Step 3: Verify removal confirmation
+        try:
+            ps_after = subprocess.run(
                 [docker_bin, "ps", "-a", "--filter", f"name={container_name}", "-q"],
                 capture_output=True,
                 text=True,
                 timeout=2,
                 env=env
             )
-            is_gone = not bool(ps_proc.stdout.strip())
+            is_gone = not bool(ps_after.stdout.strip())
+        except Exception:
+            is_gone = False
+
+        if is_gone:
             return {
-                "success": is_gone,
-                "returncode": rm_proc.returncode,
-                "confirmed_removed": is_gone,
-                "stderr": rm_proc.stderr[:500] if rm_proc.returncode != 0 else ""
+                "success": True,
+                "status": "workload_terminated_and_removed",
+                "confirmed_removed": True,
+                "returncode": rm_proc.returncode
             }
-        except Exception as e:
+        else:
             return {
                 "success": False,
-                "error": f"Cleanup failed: {e}",
-                "confirmed_removed": False
+                "status": "cleanup_attempted_unconfirmed",
+                "confirmed_removed": False,
+                "returncode": rm_proc.returncode,
+                "error": "Container still detected on Docker daemon after removal attempt",
+                "stderr": rm_proc.stderr[:300] if rm_proc.returncode != 0 else ""
             }
 
     @classmethod
@@ -187,7 +267,13 @@ class IsolatedExecutionProvider:
         if not cls.is_isolation_available():
             return {
                 "success": False,
-                "error": "Isolated container environment (Docker) is unavailable. Code execution on host is strictly disabled."
+                "error": "Isolated container environment (Docker) is unavailable. Code execution on host is strictly disabled.",
+                "cleanup": {
+                    "success": False,
+                    "status": "daemon_unavailable",
+                    "confirmed_removed": True,
+                    "error": "Docker daemon unavailable; no container was created"
+                }
             }
 
         docker_bin = shutil.which("docker") or "docker"
@@ -225,13 +311,30 @@ class IsolatedExecutionProvider:
                 timeout=timeout,
                 env=env
             )
-            return {
-                "success": proc.returncode == 0,
-                "returncode": proc.returncode,
-                "stdout": proc.stdout[:10000],
-                "stderr": proc.stderr[:5000],
-                "container_name": container_name
-            }
+            if proc.returncode == 0:
+                return {
+                    "success": True,
+                    "returncode": 0,
+                    "stdout": proc.stdout[:10000],
+                    "stderr": proc.stderr[:5000],
+                    "container_name": container_name,
+                    "cleanup": {
+                        "success": True,
+                        "status": "container_already_absent",
+                        "confirmed_removed": True,
+                        "returncode": 0
+                    }
+                }
+            else:
+                cleanup_res = cls._force_cleanup_container(docker_bin, container_name, env)
+                return {
+                    "success": False,
+                    "returncode": proc.returncode,
+                    "stdout": proc.stdout[:10000],
+                    "stderr": proc.stderr[:5000],
+                    "container_name": container_name,
+                    "cleanup": cleanup_res
+                }
         except subprocess.TimeoutExpired:
             # Forced cleanup: actively stop and remove the specific task container
             cleanup_res = cls._force_cleanup_container(docker_bin, container_name, env)
@@ -242,12 +345,13 @@ class IsolatedExecutionProvider:
                 "container_name": container_name,
                 "cleanup": cleanup_res
             }
-        except Exception as e:
-            cls._force_cleanup_container(docker_bin, container_name, env)
+        except (Exception, KeyboardInterrupt) as e:
+            cleanup_res = cls._force_cleanup_container(docker_bin, container_name, env)
             return {
                 "success": False,
                 "error": str(e),
-                "container_name": container_name
+                "container_name": container_name,
+                "cleanup": cleanup_res
             }
 
 

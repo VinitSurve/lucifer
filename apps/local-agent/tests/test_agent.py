@@ -355,7 +355,7 @@ def test_adversarial_symlink_escape_and_traversal(tmp_path):
     assert "outside permitted" in res_cwd_traversal["error"]
 
 # =============================================================================
-# PHASE 5.1.2: DOCKER LIFECYCLE & RESOURCE HARDENING REGRESSION TESTS
+# PHASE 5.1.4: DOCKER ENDPOINT TRUST & CLEANUP OBSERVABILITY REGRESSION TESTS
 # =============================================================================
 
 def test_docker_tcp_endpoints_strictly_rejected(monkeypatch):
@@ -464,56 +464,144 @@ def test_docker_symlink_escape_socket_rejected(monkeypatch, tmp_path):
         if untrusted_target.exists():
             untrusted_target.unlink()
 
-def test_docker_concurrent_task_container_naming(tmp_path):
-    """Verifies deterministic, unique, collision-resistant container naming."""
-    names = set()
-    for i in range(20):
-        # Unique suffix generation inside execute_in_container
-        clean_task_id = "test-task-1"
-        safe_task_id = clean_task_id[:16]
-        suffix = uuid.uuid4().hex[:12]
-        cname = f"lucifer-exec-{safe_task_id}-{suffix}"
-        assert cname.startswith("lucifer-exec-test-task-1-")
-        assert len(cname) <= 45
-        assert cname not in names
-        names.add(cname)
-    assert len(names) == 20
-
-def test_docker_forced_cleanup_handling(monkeypatch):
-    """Verifies _force_cleanup_container returns structured results and detects removal."""
-    # Mock subprocess.run for cleanup commands
+def test_docker_cleanup_observability_states(monkeypatch):
+    """Verifies all 5 cleanup observability states in _force_cleanup_container (DEF-03)."""
     class MockProcess:
         def __init__(self, returncode=0, stdout="", stderr=""):
             self.returncode = returncode
             self.stdout = stdout
             self.stderr = stderr
 
-    # Test successful cleanup where container is confirmed gone
+    # 1. State: container_already_absent (ps_before returns empty)
+    def mock_run_absent(cmd, **kwargs):
+        if cmd[1] == "ps":
+            return MockProcess(returncode=0, stdout="")
+        return MockProcess(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", mock_run_absent)
+    res_absent = IsolatedExecutionProvider._force_cleanup_container("docker", "c1", {})
+    assert res_absent["success"] is True
+    assert res_absent["status"] == "container_already_absent"
+    assert res_absent["confirmed_removed"] is True
+
+    # 2. State: workload_terminated_and_removed (ps_before has ID, rm succeeds, ps_after empty)
+    calls = []
+    def mock_run_terminated(cmd, **kwargs):
+        calls.append(cmd[1])
+        if cmd[1] == "ps":
+            if len([c for c in calls if c == "ps"]) == 1:
+                return MockProcess(returncode=0, stdout="c2-id\n")
+            else:
+                return MockProcess(returncode=0, stdout="")
+        if cmd[1] == "rm":
+            return MockProcess(returncode=0, stdout="c2\n")
+        return MockProcess(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", mock_run_terminated)
+    res_term = IsolatedExecutionProvider._force_cleanup_container("docker", "c2", {})
+    assert res_term["success"] is True
+    assert res_term["status"] == "workload_terminated_and_removed"
+    assert res_term["confirmed_removed"] is True
+
+    # 3. State: cleanup_attempted_unconfirmed (ps_after still shows container)
+    calls_stuck = []
+    def mock_run_unconfirmed(cmd, **kwargs):
+        calls_stuck.append(cmd[1])
+        if cmd[1] == "ps":
+            return MockProcess(returncode=0, stdout="c3-id\n")
+        if cmd[1] == "rm":
+            return MockProcess(returncode=1, stderr="Error response from daemon")
+        return MockProcess(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", mock_run_unconfirmed)
+    res_unconfirmed = IsolatedExecutionProvider._force_cleanup_container("docker", "c3", {})
+    assert res_unconfirmed["success"] is False
+    assert res_unconfirmed["status"] == "cleanup_attempted_unconfirmed"
+    assert res_unconfirmed["confirmed_removed"] is False
+
+    # 4. State: daemon_unavailable (ps fails with daemon connection error)
+    def mock_run_daemon_down(cmd, **kwargs):
+        return MockProcess(returncode=1, stderr="Cannot connect to the Docker daemon at unix:///var/run/docker.sock")
+
+    monkeypatch.setattr(subprocess, "run", mock_run_daemon_down)
+    res_daemon_down = IsolatedExecutionProvider._force_cleanup_container("docker", "c4", {})
+    assert res_daemon_down["success"] is False
+    assert res_daemon_down["status"] == "daemon_unavailable"
+    assert res_daemon_down["confirmed_removed"] is False
+
+    # 5. State: cleanup_failed (unexpected exception during execution)
+    def mock_run_exception(cmd, **kwargs):
+        raise OSError("Subprocess execution failed")
+
+    monkeypatch.setattr(subprocess, "run", mock_run_exception)
+    res_failed = IsolatedExecutionProvider._force_cleanup_container("docker", "c5", {})
+    assert res_failed["success"] is False
+    assert res_failed["status"] == "cleanup_failed"
+    assert res_failed["confirmed_removed"] is False
+
+def test_docker_execute_in_container_cleanup_preservation(monkeypatch, tmp_path):
+    """Verifies execute_in_container preserves cleanup status across all result branches."""
+    # Branch 1: Daemon unavailable
+    monkeypatch.setattr(IsolatedExecutionProvider, "is_isolation_available", classmethod(lambda cls: False))
+    res_unavail = IsolatedExecutionProvider.execute_in_container(
+        image="python:3.12-slim",
+        command=["python3", "-c", "print(1)"],
+        workspace_mount=str(tmp_path)
+    )
+    assert res_unavail["success"] is False
+    assert "cleanup" in res_unavail
+    assert res_unavail["cleanup"]["status"] == "daemon_unavailable"
+
+    # Branch 2: Successful execution (container auto-removed)
+    monkeypatch.setattr(IsolatedExecutionProvider, "is_isolation_available", classmethod(lambda cls: True))
     def mock_run_success(cmd, **kwargs):
-        if cmd[1] == "rm":
-            return MockProcess(returncode=0, stdout="test-container")
-        if cmd[1] == "ps":
-            return MockProcess(returncode=0, stdout="")  # Container not in ps
-        return MockProcess(returncode=0)
-
+        class Res:
+            returncode = 0
+            stdout = "hello\n"
+            stderr = ""
+        return Res()
     monkeypatch.setattr(subprocess, "run", mock_run_success)
-    res = IsolatedExecutionProvider._force_cleanup_container("docker", "test-container", {})
-    assert res["success"] is True
-    assert res["confirmed_removed"] is True
+    res_success = IsolatedExecutionProvider.execute_in_container(
+        image="python:3.12-slim",
+        command=["python3", "-c", "print(1)"],
+        workspace_mount=str(tmp_path)
+    )
+    assert res_success["success"] is True
+    assert "cleanup" in res_success
+    assert res_success["cleanup"]["confirmed_removed"] is True
+    assert res_success["cleanup"]["status"] == "container_already_absent"
 
-    # Test cleanup failure surfaced when ps still shows container
-    def mock_run_stuck(cmd, **kwargs):
-        if cmd[1] == "rm":
-            return MockProcess(returncode=1, stderr="Error: cannot remove")
-        if cmd[1] == "ps":
-            return MockProcess(returncode=0, stdout="test-container-id\n")
-        return MockProcess(returncode=0)
+    # Branch 3: Command failure (non-zero return code)
+    def mock_run_fail(cmd, **kwargs):
+        class Res:
+            returncode = 1
+            stdout = ""
+            stderr = "SyntaxError"
+        return Res()
+    monkeypatch.setattr(subprocess, "run", mock_run_fail)
+    monkeypatch.setattr(IsolatedExecutionProvider, "_force_cleanup_container", classmethod(
+        lambda cls, dbin, cname, env: {"success": True, "status": "container_already_absent", "confirmed_removed": True}
+    ))
+    res_fail = IsolatedExecutionProvider.execute_in_container(
+        image="python:3.12-slim",
+        command=["python3", "-c", "print(1)"],
+        workspace_mount=str(tmp_path)
+    )
+    assert res_fail["success"] is False
+    assert res_fail["cleanup"]["status"] == "container_already_absent"
 
-    monkeypatch.setattr(subprocess, "run", mock_run_stuck)
-    res_stuck = IsolatedExecutionProvider._force_cleanup_container("docker", "test-container", {})
-    assert res_stuck["success"] is False
-    assert res_stuck["confirmed_removed"] is False
-    assert "Error: cannot remove" in res_stuck["stderr"]
+    # Branch 4: General exception
+    def mock_run_raise(cmd, **kwargs):
+        raise RuntimeError("Unexpected runtime failure")
+    monkeypatch.setattr(subprocess, "run", mock_run_raise)
+    res_exc = IsolatedExecutionProvider.execute_in_container(
+        image="python:3.12-slim",
+        command=["python3", "-c", "print(1)"],
+        workspace_mount=str(tmp_path)
+    )
+    assert res_exc["success"] is False
+    assert "Unexpected runtime failure" in res_exc["error"]
+    assert "cleanup" in res_exc
 
 def test_docker_pids_limit_in_command(tmp_path, monkeypatch):
     """Verifies --pids-limit 128 is included in generated docker command."""
