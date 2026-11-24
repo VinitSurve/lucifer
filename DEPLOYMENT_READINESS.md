@@ -45,8 +45,8 @@ The following secrets must be set before deploying to production via `wrangler s
 
 | Secret Name | Required? | Source / Instructions |
 |---|---|---|
-| `TELEGRAM_BOT_TOKEN` | **YES** | Generated via `@BotFather` on Telegram |
-| `TELEGRAM_OWNER_ID` | **YES** | Numerical ID obtained from `@userinfobot` |
+| `TELEGRAM_BOT_TOKEN` | **YES** | Staging bot token for `@LuciferStagingVinitBot` (via `@BotFather`) |
+| `TELEGRAM_OWNER_ID` | **YES** | Operator's primary Telegram numeric user ID (obtained from `@userinfobot`; usernames strictly prohibited) |
 | `TELEGRAM_WEBHOOK_SECRET` | **YES** | Cryptographic random string (e.g. `openssl rand -hex 24`) |
 | `CLOUDFLARE_API_TOKEN` | For CI/CD | Cloudflare API token with Workers:Edit permissions |
 | `CLOUDFLARE_ACCOUNT_ID` | For CI/CD | Found on Cloudflare dashboard |

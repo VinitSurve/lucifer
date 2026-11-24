@@ -346,6 +346,101 @@ describe('Lucifer Cloud Worker — Phase 2 Security Hardening Tests', () => {
     expect(MockD1PreparedStatement.store.processedUpdates.has(777)).toBe(true);
   });
 
+  it('rejects webhook message from unauthorized numeric sender and logs UNAUTHORIZED_MESSAGE audit', async () => {
+    const unauthUpdate = {
+      update_id: 888,
+      message: {
+        message_id: 2,
+        from: { id: 999888777, is_bot: false, first_name: 'Stranger', username: 'unauthorized_stranger' },
+        chat: { id: 999888777, type: 'private' },
+        date: Math.floor(Date.now() / 1000),
+        text: '/status'
+      }
+    };
+
+    const req = new Request('https://lucifer.local/webhook/telegram', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Telegram-Bot-Api-Secret-Token': 'test-webhook-secret'
+      },
+      body: JSON.stringify(unauthUpdate)
+    });
+
+    const resp = await worker.fetch(req, mockEnv, mockCtx);
+    expect(resp.status).toBe(200);
+
+    const deniedLog = MockD1PreparedStatement.store.auditLogs.find(
+      (log) => log.action === 'UNAUTHORIZED_MESSAGE' && log.status === 'DENIED'
+    );
+    expect(deniedLog).toBeDefined();
+    expect(deniedLog?.user_id).toBe('999888777');
+  });
+
+  it('rejects webhook message without numeric id (e.g. username only spoof attempt)', async () => {
+    const spoofUpdate = {
+      update_id: 889,
+      message: {
+        message_id: 3,
+        from: { username: 'VinitSurve' } as any, // Missing numeric id
+        chat: { id: 123456789, type: 'private' },
+        date: Math.floor(Date.now() / 1000),
+        text: '/status'
+      }
+    };
+
+    const req = new Request('https://lucifer.local/webhook/telegram', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Telegram-Bot-Api-Secret-Token': 'test-webhook-secret'
+      },
+      body: JSON.stringify(spoofUpdate)
+    });
+
+    const resp = await worker.fetch(req, mockEnv, mockCtx);
+    expect(resp.status).toBe(200);
+
+    const deniedLog = MockD1PreparedStatement.store.auditLogs.find(
+      (log) => log.action === 'UNAUTHORIZED_MESSAGE' && log.status === 'DENIED'
+    );
+    expect(deniedLog).toBeDefined();
+  });
+
+  it('fails closed with 500 when TELEGRAM_OWNER_ID is misconfigured with a username', async () => {
+    const badEnv = {
+      ...mockEnv,
+      TELEGRAM_OWNER_ID: '@LuciferStagingVinitBot' // Invalid: username instead of numeric ID
+    };
+
+    const req = new Request('https://lucifer.local/webhook/telegram', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Telegram-Bot-Api-Secret-Token': 'test-webhook-secret'
+      },
+      body: JSON.stringify({
+        update_id: 890,
+        message: {
+          message_id: 4,
+          from: { id: 123456789, is_bot: false },
+          chat: { id: 123456789, type: 'private' },
+          date: Math.floor(Date.now() / 1000),
+          text: '/status'
+        }
+      })
+    });
+
+    const resp = await worker.fetch(req, badEnv, mockCtx);
+    expect(resp.status).toBe(500);
+
+    const auditLog = MockD1PreparedStatement.store.auditLogs.find(
+      (log) => log.action === 'AUTH_GUARD_INIT_FAILED' && log.status === 'DENIED'
+    );
+    expect(auditLog).toBeDefined();
+    expect(String(auditLog?.details)).toContain('Telegram owner ID must be an immutable numeric ID');
+  });
+
   it('rejects unauthenticated local agent heartbeat with 401', async () => {
     const req = new Request('https://lucifer.local/api/agent/heartbeat', {
       method: 'POST',

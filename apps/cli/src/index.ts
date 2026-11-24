@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { SecretRedactor } from '@lucifer/security';
+import { SecretRedactor, TelegramAuthGuard } from '@lucifer/security';
 import { ProviderHealthTracker, OllamaProvider } from '@lucifer/provider-registry';
 
 async function runDoctor() {
@@ -26,7 +26,11 @@ async function runDoctor() {
   for (const v of requiredVars) {
     const val = process.env[v.name];
     if (val && val.trim().length > 0) {
-      console.log(`  [✓] ${v.name}: Configured (Length: ${val.length})`);
+      if (v.name === 'TELEGRAM_OWNER_ID' && !TelegramAuthGuard.isValidNumericTelegramId(val)) {
+        console.log(`  [!] ${v.name}: INVALID (Must be an immutable numeric Telegram user ID from @userinfobot, not a username or handle)`);
+      } else {
+        console.log(`  [✓] ${v.name}: Configured (Length: ${val.length})`);
+      }
     } else if (v.optional) {
       console.log(`  [-] ${v.name}: Not set (Optional free-tier provider/integration)`);
     } else {

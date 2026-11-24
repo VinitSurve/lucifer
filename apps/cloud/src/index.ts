@@ -54,10 +54,18 @@ export default {
         });
       }
 
-      const authGuard = new TelegramAuthGuard({
-        ownerId: env.TELEGRAM_OWNER_ID || '',
-        webhookSecret: env.TELEGRAM_WEBHOOK_SECRET
-      });
+      let authGuard: TelegramAuthGuard;
+      try {
+        authGuard = new TelegramAuthGuard({
+          ownerId: env.TELEGRAM_OWNER_ID || '',
+          webhookSecret: env.TELEGRAM_WEBHOOK_SECRET
+        });
+      } catch (err: any) {
+        await repo.logAudit(undefined, 'AUTH_GUARD_INIT_FAILED', undefined, 'DENIED', 'TIER_3_DANGEROUS', {
+          error: err?.message || String(err)
+        });
+        return new Response('Unauthorized configuration', { status: 500 });
+      }
 
       // Validate webhook secret token header
       const headerSecret = request.headers.get('X-Telegram-Bot-Api-Secret-Token');

@@ -2,9 +2,11 @@
 
 ## 1. Telegram Bot (Primary Interface)
 1. Message `@BotFather` on Telegram.
-2. Send `/newbot`, name your bot (e.g. `Lucifer Assistant`).
+2. For staging, the dedicated bot is `@LuciferStagingVinitBot`.
 3. Note the generated `TELEGRAM_BOT_TOKEN`.
-4. Message `@userinfobot` to retrieve your numerical user ID. Set this as `TELEGRAM_OWNER_ID`.
+4. Message `@userinfobot` to retrieve the operator's primary Telegram numerical user ID. Set this as `TELEGRAM_OWNER_ID`.
+   > [!IMPORTANT]
+   > Authorization strictly enforces immutable numeric Telegram User IDs (`from.id`). Telegram usernames/handles (`@username`) can change or be impersonated and are strictly rejected as authorization identifiers. Do not create a separate Telegram account for staging; use the operator's primary numeric account ID.
 
 ## 2. Free AI Providers
 

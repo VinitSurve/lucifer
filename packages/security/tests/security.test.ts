@@ -22,10 +22,12 @@ describe('TelegramAuthGuard', () => {
 
   it('allows additional authorized user id', () => {
     expect(guard.isUserAuthorized('87654321')).toBe(true);
+    expect(guard.isUserAuthorized(87654321)).toBe(true);
   });
 
   it('rejects unauthorized user id', () => {
     expect(guard.isUserAuthorized(99999999)).toBe(false);
+    expect(guard.isUserAuthorized('99999999')).toBe(false);
     expect(guard.isUserAuthorized(undefined)).toBe(false);
   });
 
@@ -37,6 +39,94 @@ describe('TelegramAuthGuard', () => {
     expect(guard.validateWebhookSecret('wrong-token')).toBe(false);
     expect(guard.validateWebhookSecret(null)).toBe(false);
     expect(guard.validateWebhookSecret('')).toBe(false);
+  });
+
+  it('static isValidNumericTelegramId validates numeric IDs strictly', () => {
+    expect(TelegramAuthGuard.isValidNumericTelegramId(12345678)).toBe(true);
+    expect(TelegramAuthGuard.isValidNumericTelegramId('12345678')).toBe(true);
+    expect(TelegramAuthGuard.isValidNumericTelegramId('9876543210123')).toBe(true);
+
+    // Strictly rejects zero and negative IDs
+    expect(TelegramAuthGuard.isValidNumericTelegramId(0)).toBe(false);
+    expect(TelegramAuthGuard.isValidNumericTelegramId('0')).toBe(false);
+    expect(TelegramAuthGuard.isValidNumericTelegramId(-12345)).toBe(false);
+    expect(TelegramAuthGuard.isValidNumericTelegramId('-12345')).toBe(false);
+
+    // Strictly rejects usernames and handles
+    expect(TelegramAuthGuard.isValidNumericTelegramId('@LuciferStagingVinitBot')).toBe(false);
+    expect(TelegramAuthGuard.isValidNumericTelegramId('@VinitSurve')).toBe(false);
+    expect(TelegramAuthGuard.isValidNumericTelegramId('VinitSurve')).toBe(false);
+    expect(TelegramAuthGuard.isValidNumericTelegramId('user_12345')).toBe(false);
+
+    // Strictly rejects non-numeric types, floats, and empty values
+    expect(TelegramAuthGuard.isValidNumericTelegramId(12.34)).toBe(false);
+    expect(TelegramAuthGuard.isValidNumericTelegramId('12.34')).toBe(false);
+    expect(TelegramAuthGuard.isValidNumericTelegramId('')).toBe(false);
+    expect(TelegramAuthGuard.isValidNumericTelegramId('   ')).toBe(false);
+    expect(TelegramAuthGuard.isValidNumericTelegramId(null)).toBe(false);
+    expect(TelegramAuthGuard.isValidNumericTelegramId(undefined)).toBe(false);
+    expect(TelegramAuthGuard.isValidNumericTelegramId(NaN)).toBe(false);
+    expect(TelegramAuthGuard.isValidNumericTelegramId(Infinity)).toBe(false);
+    expect(TelegramAuthGuard.isValidNumericTelegramId({})).toBe(false);
+  });
+
+  it('rejects username strings as ownerId during instantiation', () => {
+    expect(() => new TelegramAuthGuard({ ownerId: '@LuciferStagingVinitBot' })).toThrow(
+      /Telegram owner ID must be an immutable numeric ID/
+    );
+    expect(() => new TelegramAuthGuard({ ownerId: '@VinitSurve' })).toThrow(
+      /Telegram owner ID must be an immutable numeric ID/
+    );
+    expect(() => new TelegramAuthGuard({ ownerId: 'VinitSurve' })).toThrow(
+      /Telegram owner ID must be an immutable numeric ID/
+    );
+  });
+
+  it('rejects invalid or negative values as ownerId during instantiation', () => {
+    expect(() => new TelegramAuthGuard({ ownerId: -100123456 })).toThrow(
+      /Telegram owner ID must be an immutable numeric ID/
+    );
+    expect(() => new TelegramAuthGuard({ ownerId: 'abc1234' })).toThrow(
+      /Telegram owner ID must be an immutable numeric ID/
+    );
+    expect(() => new TelegramAuthGuard({ ownerId: 12.34 })).toThrow(
+      /Telegram owner ID must be an immutable numeric ID/
+    );
+  });
+
+  it('rejects usernames in allowedUserIds during instantiation', () => {
+    expect(() => new TelegramAuthGuard({ ownerId: '12345678', allowedUserIds: ['@unauthorized_user'] })).toThrow(
+      /Telegram user ID must be an immutable numeric ID/
+    );
+    expect(() => new TelegramAuthGuard({ ownerId: '12345678', allowedUserIds: ['guest_user'] })).toThrow(
+      /Telegram user ID must be an immutable numeric ID/
+    );
+  });
+
+  it('fails closed when ownerId is empty or omitted', () => {
+    const emptyGuard = new TelegramAuthGuard({});
+    expect(emptyGuard.isUserAuthorized(12345678)).toBe(false);
+
+    const blankGuard = new TelegramAuthGuard({ ownerId: '' });
+    expect(blankGuard.isUserAuthorized(12345678)).toBe(false);
+  });
+
+  it('isUserAuthorized strictly rejects usernames, handles, and malicious strings', () => {
+    expect(guard.isUserAuthorized('@LuciferStagingVinitBot')).toBe(false);
+    expect(guard.isUserAuthorized('@VinitSurve')).toBe(false);
+    expect(guard.isUserAuthorized('VinitSurve')).toBe(false);
+    expect(guard.isUserAuthorized('12345678; DROP TABLE users;')).toBe(false);
+    expect(guard.isUserAuthorized('admin')).toBe(false);
+  });
+
+  it('isUserAuthorized strictly rejects invalid non-numeric types', () => {
+    expect(guard.isUserAuthorized(null)).toBe(false);
+    expect(guard.isUserAuthorized(undefined)).toBe(false);
+    expect(guard.isUserAuthorized(NaN)).toBe(false);
+    expect(guard.isUserAuthorized(-12345678)).toBe(false);
+    expect(guard.isUserAuthorized(1234.56)).toBe(false);
+    expect(guard.isUserAuthorized({ id: 12345678 } as any)).toBe(false);
+    expect(guard.isUserAuthorized(['12345678'] as any)).toBe(false);
   });
 });
 
