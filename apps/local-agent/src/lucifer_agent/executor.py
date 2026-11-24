@@ -24,8 +24,52 @@ class IsolatedExecutionProvider:
     If Docker or container isolation is unavailable, code execution remains disabled.
     """
 
-    @staticmethod
-    def is_isolation_available() -> bool:
+    @classmethod
+    def resolve_docker_endpoint(cls) -> Optional[str]:
+        """Resolves trusted Docker endpoint without relying on arbitrary user HOME environment.
+        Checks:
+        1. DOCKER_HOST in os.environ (strictly validated for safe unix socket or tcp schema).
+        2. Known trusted Unix sockets (/var/run/docker.sock, ~/.colima/default/docker.sock, ~/.docker/run/docker.sock).
+        Returns validated endpoint string (e.g. 'unix:///path/to/docker.sock') or None if unavailable.
+        """
+        raw_env_host = os.environ.get("DOCKER_HOST", "").strip()
+        if raw_env_host:
+            if raw_env_host.startswith("unix://"):
+                sock_path = Path(raw_env_host[len("unix://"):])
+                try:
+                    if sock_path.is_socket():
+                        return f"unix://{sock_path.resolve()}"
+                except Exception:
+                    pass
+            elif re.match(r"^tcp://[a-zA-Z0-9_.-]+:[0-9]+$", raw_env_host):
+                return raw_env_host
+
+        # Probe trusted candidate socket paths in order
+        candidates = [
+            Path("/var/run/docker.sock"),
+            Path.home() / ".colima" / "default" / "docker.sock",
+            Path.home() / ".docker" / "run" / "docker.sock"
+        ]
+        for candidate in candidates:
+            try:
+                if candidate.is_socket():
+                    return f"unix://{candidate.resolve()}"
+            except Exception:
+                continue
+
+        return None
+
+    @classmethod
+    def get_safe_process_env(cls) -> Dict[str, str]:
+        """Returns strictly sanitized environment with trusted DOCKER_HOST if available."""
+        env = dict(SAFE_PROCESS_ENV)
+        endpoint = cls.resolve_docker_endpoint()
+        if endpoint:
+            env["DOCKER_HOST"] = endpoint
+        return env
+
+    @classmethod
+    def is_isolation_available(cls) -> bool:
         """Detects whether Docker container isolation is available and responsive."""
         docker_bin = shutil.which("docker")
         if not docker_bin:
@@ -37,7 +81,7 @@ class IsolatedExecutionProvider:
                 capture_output=True,
                 text=True,
                 timeout=2,
-                env=SAFE_PROCESS_ENV
+                env=cls.get_safe_process_env()
             )
             return res.returncode == 0
         except Exception:
@@ -61,6 +105,7 @@ class IsolatedExecutionProvider:
             "--security-opt", "no-new-privileges",
             "--memory", "512m",               # 512MB RAM limit
             "--cpus", "1.0",                  # 1 CPU core limit
+            "--pids-limit", "128",            # Explicit PID limit to prevent fork bombs
             "-v", f"{workspace_mount}:/workspace:ro", # Read-only workspace mount
             "-w", "/workspace",
             image
@@ -72,7 +117,7 @@ class IsolatedExecutionProvider:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                env=SAFE_PROCESS_ENV
+                env=cls.get_safe_process_env()
             )
             return {
                 "success": proc.returncode == 0,

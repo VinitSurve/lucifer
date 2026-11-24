@@ -1,6 +1,6 @@
 import pytest
 from pathlib import Path
-from lucifer_agent.executor import ControlledExecutor
+from lucifer_agent.executor import ControlledExecutor, IsolatedExecutionProvider, SAFE_PROCESS_ENV
 from lucifer_agent.sysinfo import get_system_metrics
 from lucifer_agent.ollama_client import OllamaClient
 
@@ -57,12 +57,13 @@ def test_controlled_executor_command_allowlist(tmp_path):
     assert blocked["success"] is False
     assert "not in the local agent command allowlist" in blocked["error"]
 
-def test_python3_interpreter_strictly_blocked(tmp_path):
+def test_python3_interpreter_strictly_blocked(tmp_path, monkeypatch):
     safe_dir = tmp_path / "safe_projects"
     safe_dir.mkdir()
     executor = ControlledExecutor([str(safe_dir)])
 
-    # Attempt arbitrary python code execution - MUST BE BLOCKED
+    # Attempt arbitrary python code execution on host - MUST BE BLOCKED
+    monkeypatch.setattr(IsolatedExecutionProvider, "is_isolation_available", classmethod(lambda cls: False))
     blocked = executor.execute_command("python3", ["-c", "import sys; print('pwned')"], str(safe_dir))
     assert blocked["success"] is False
     assert "arbitrary interpreters are blocked" in blocked["error"]
@@ -120,12 +121,13 @@ def test_sensitive_file_read_blocked(tmp_path):
     assert res_key["success"] is False
     assert "Access to sensitive file" in res_key["error"]
 
-def test_npm_pnpm_pytest_uv_blocked_on_host(tmp_path):
+def test_npm_pnpm_pytest_uv_blocked_on_host(tmp_path, monkeypatch):
     safe_dir = tmp_path / "safe_projects"
     safe_dir.mkdir()
     executor = ControlledExecutor([str(safe_dir)])
 
     # All build tools, interpreters, and test runners must be blocked on host
+    monkeypatch.setattr(IsolatedExecutionProvider, "is_isolation_available", classmethod(lambda cls: False))
     for tool, args in [("npm", ["test"]), ("pnpm", ["run", "build"]), ("pytest", ["-q"]), ("uv", ["run", "test"])]:
         res = executor.execute_command(tool, args, str(safe_dir))
         assert res["success"] is False
@@ -348,3 +350,65 @@ def test_adversarial_symlink_escape_and_traversal(tmp_path):
     res_cwd_traversal = executor.execute_command("echo", ["hello"], str(safe_dir / ".." / "outside_world"))
     assert res_cwd_traversal["success"] is False
     assert "outside permitted" in res_cwd_traversal["error"]
+
+# =============================================================================
+# PHASE 5.1.2: DOCKER ENDPOINT RESOLUTION & PID LIMIT REGRESSION TESTS
+# =============================================================================
+
+def test_docker_deterministic_endpoint_resolution(monkeypatch, tmp_path):
+    """Verifies deterministic Docker endpoint resolution under SAFE_PROCESS_ENV."""
+    import uuid
+    import socket
+    fake_sock = Path(f"/tmp/d_{uuid.uuid4().hex[:6]}.sock")
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.bind(str(fake_sock))
+    try:
+        monkeypatch.setenv("DOCKER_HOST", f"unix://{fake_sock}")
+        endpoint = IsolatedExecutionProvider.resolve_docker_endpoint()
+        assert endpoint == f"unix://{fake_sock.resolve()}"
+
+        safe_env = IsolatedExecutionProvider.get_safe_process_env()
+        assert safe_env["DOCKER_HOST"] == f"unix://{fake_sock.resolve()}"
+        assert safe_env["HOME"] == "/tmp"  # Sanitized HOME preserved
+        assert "LANG" in safe_env
+    finally:
+        s.close()
+        if fake_sock.exists():
+            fake_sock.unlink()
+
+    fake_file = tmp_path / "not_a_socket.txt"
+    fake_file.write_text("dummy", encoding="utf-8")
+    monkeypatch.setenv("DOCKER_HOST", f"unix://{fake_file}")
+    ep_non_sock = IsolatedExecutionProvider.resolve_docker_endpoint()
+    assert ep_non_sock != f"unix://{fake_file}"
+
+    monkeypatch.setenv("DOCKER_HOST", "tcp://evil.com:1234; rm -rf /")
+    ep_invalid = IsolatedExecutionProvider.resolve_docker_endpoint()
+    assert ep_invalid != "tcp://evil.com:1234; rm -rf /"
+
+def test_docker_pids_limit_in_command(tmp_path, monkeypatch):
+    """Verifies --pids-limit 128 is included in generated docker command."""
+    import subprocess
+    executed_cmds = []
+
+    def mock_run(cmd, **kwargs):
+        executed_cmds.append(cmd)
+        class Res:
+            returncode = 0
+            stdout = "success"
+            stderr = ""
+        return Res()
+
+    monkeypatch.setattr(IsolatedExecutionProvider, "is_isolation_available", classmethod(lambda cls: True))
+    monkeypatch.setattr(subprocess, "run", mock_run)
+
+    safe_dir = tmp_path / "safe_projects"
+    safe_dir.mkdir()
+    executor = ControlledExecutor([str(safe_dir)])
+
+    executor.execute_command("python", ["-c", "print(1)"], str(safe_dir))
+    assert len(executed_cmds) > 0
+    cmd = executed_cmds[0]
+    assert "--pids-limit" in cmd
+    idx = cmd.index("--pids-limit")
+    assert cmd[idx + 1] == "128"
