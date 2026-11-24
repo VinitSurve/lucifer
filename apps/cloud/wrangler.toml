@@ -35,7 +35,7 @@ BUDGET_MODE = "FREE_ONLY"
 [[env.staging.d1_databases]]
 binding = "DB"
 database_name = "lucifer-staging-db"
-database_id = "local-lucifer-staging-d1"
+database_id = "ed1a998e-3fac-4fad-a2e6-e38c9894d788"
 migrations_dir = "migrations"
 
 [env.staging.triggers]
