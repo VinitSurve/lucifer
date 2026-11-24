@@ -83,11 +83,11 @@ jobs:
           pnpm approve-builds --all
           pnpm install --frozen-lockfile
 
-      - name: Lint and Typecheck TypeScript
-        run: pnpm run lint
-
       - name: Build TypeScript Packages & Cloud Worker
         run: pnpm run build
+
+      - name: Lint and Typecheck TypeScript
+        run: pnpm run lint
 
       - name: Run TypeScript Tests
         run: pnpm run test
