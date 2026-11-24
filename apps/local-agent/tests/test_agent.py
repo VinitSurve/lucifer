@@ -358,39 +358,111 @@ def test_adversarial_symlink_escape_and_traversal(tmp_path):
 # PHASE 5.1.2: DOCKER LIFECYCLE & RESOURCE HARDENING REGRESSION TESTS
 # =============================================================================
 
-def test_docker_deterministic_endpoint_resolution(monkeypatch, tmp_path):
-    """Verifies deterministic Docker endpoint resolution under SAFE_PROCESS_ENV."""
-    # 1. Test resolution when DOCKER_HOST points to a valid socket (use short path in /tmp for macOS AF_UNIX limit)
-    fake_sock = Path(f"/tmp/d_{uuid.uuid4().hex[:6]}.sock")
+def test_docker_tcp_endpoints_strictly_rejected(monkeypatch):
+    """Verifies that all TCP/HTTP endpoints are strictly rejected (DEF-01)."""
+    # 1. Plain TCP IP
+    monkeypatch.setenv("DOCKER_HOST", "tcp://127.0.0.1:2375")
+    assert IsolatedExecutionProvider.resolve_docker_endpoint() is None
+
+    # 2. Remote TCP Hostname
+    monkeypatch.setenv("DOCKER_HOST", "tcp://docker-daemon.internal:2375")
+    assert IsolatedExecutionProvider.resolve_docker_endpoint() is None
+
+    # 3. HTTP / HTTPS URL
+    monkeypatch.setenv("DOCKER_HOST", "http://127.0.0.1:2375")
+    assert IsolatedExecutionProvider.resolve_docker_endpoint() is None
+    monkeypatch.setenv("DOCKER_HOST", "https://127.0.0.1:2376")
+    assert IsolatedExecutionProvider.resolve_docker_endpoint() is None
+
+    # 4. Command injection attempt via TCP string
+    monkeypatch.setenv("DOCKER_HOST", "tcp://evil.com:1234; rm -rf /")
+    assert IsolatedExecutionProvider.resolve_docker_endpoint() is None
+
+    # 5. Environment sanitization check: SAFE_PROCESS_ENV never inherits arbitrary DOCKER_* env
+    monkeypatch.setenv("DOCKER_TLS_VERIFY", "1")
+    monkeypatch.setenv("DOCKER_CERT_PATH", "/tmp/fake_certs")
+    safe_env = IsolatedExecutionProvider.get_safe_process_env()
+    assert "DOCKER_TLS_VERIFY" not in safe_env
+    assert "DOCKER_CERT_PATH" not in safe_env
+    assert safe_env["HOME"] == "/tmp"
+
+def test_docker_untrusted_unix_socket_rejected(monkeypatch, tmp_path):
+    """Verifies valid Unix sockets in untrusted paths are rejected (DEF-02)."""
     import socket
+    # 1. Real socket created in /tmp (outside trusted directories)
+    fake_sock = Path(f"/tmp/untrusted_{uuid.uuid4().hex[:6]}.sock")
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.bind(str(fake_sock))
     try:
         monkeypatch.setenv("DOCKER_HOST", f"unix://{fake_sock}")
-        endpoint = IsolatedExecutionProvider.resolve_docker_endpoint()
-        assert endpoint == f"unix://{fake_sock.resolve()}"
-
-        safe_env = IsolatedExecutionProvider.get_safe_process_env()
-        assert safe_env["DOCKER_HOST"] == f"unix://{fake_sock.resolve()}"
-        assert safe_env["HOME"] == "/tmp"  # Sanitized HOME preserved
-        assert "LANG" in safe_env
+        # Must return None (fail closed), NOT accept the arbitrary socket
+        assert IsolatedExecutionProvider.resolve_docker_endpoint() is None
     finally:
         s.close()
         if fake_sock.exists():
             fake_sock.unlink()
 
-    # 2. Test rejection of non-socket regular file
-    fake_file = tmp_path / "not_a_socket.txt"
-    fake_file.write_text("dummy", encoding="utf-8")
+    # 2. Non-socket regular file in untrusted directory
+    fake_file = tmp_path / "regular_file.txt"
+    fake_file.write_text("hello", encoding="utf-8")
     monkeypatch.setenv("DOCKER_HOST", f"unix://{fake_file}")
-    # Should ignore the regular file and fall back to trusted paths or None
-    ep_non_sock = IsolatedExecutionProvider.resolve_docker_endpoint()
-    assert ep_non_sock != f"unix://{fake_file}"
+    assert IsolatedExecutionProvider.resolve_docker_endpoint() is None
 
-    # 3. Test rejection of dangerous TCP format / injection attempts
-    monkeypatch.setenv("DOCKER_HOST", "tcp://evil.com:1234; rm -rf /")
-    ep_invalid = IsolatedExecutionProvider.resolve_docker_endpoint()
-    assert ep_invalid != "tcp://evil.com:1234; rm -rf /"
+    # 3. Missing socket path
+    monkeypatch.setenv("DOCKER_HOST", "unix:///nonexistent/path/docker.sock")
+    assert IsolatedExecutionProvider.resolve_docker_endpoint() is None
+
+def test_docker_trusted_unix_socket_accepted(monkeypatch, tmp_path):
+    """Verifies that legitimate Colima or system Docker sockets are accepted."""
+    import socket
+    # Use short path in /tmp for macOS AF_UNIX length limit (104 chars)
+    mock_home = Path(f"/tmp/h_{uuid.uuid4().hex[:6]}")
+    mock_colima_dir = mock_home / ".colima" / "test_profile"
+    mock_colima_dir.mkdir(parents=True)
+    fake_colima_sock = mock_colima_dir / "docker.sock"
+
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.bind(str(fake_colima_sock))
+    try:
+        monkeypatch.setattr(Path, "home", lambda: mock_home)
+        monkeypatch.setenv("DOCKER_HOST", f"unix://{fake_colima_sock}")
+        ep = IsolatedExecutionProvider.resolve_docker_endpoint()
+        assert ep == f"unix://{fake_colima_sock.resolve()}"
+
+        safe_env = IsolatedExecutionProvider.get_safe_process_env()
+        assert safe_env["DOCKER_HOST"] == f"unix://{fake_colima_sock.resolve()}"
+        assert safe_env["HOME"] == "/tmp"
+    finally:
+        s.close()
+        if fake_colima_sock.exists():
+            fake_colima_sock.unlink()
+        shutil.rmtree(mock_home, ignore_errors=True)
+
+def test_docker_symlink_escape_socket_rejected(monkeypatch, tmp_path):
+    """Verifies symlink escapes targeting untrusted sockets are rejected."""
+    import socket
+    # Create target socket in /tmp
+    untrusted_target = Path(f"/tmp/target_{uuid.uuid4().hex[:6]}.sock")
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.bind(str(untrusted_target))
+
+    mock_home = tmp_path / "mock_home"
+    mock_colima_dir = mock_home / ".colima" / "test_profile"
+    mock_colima_dir.mkdir(parents=True)
+    symlink_sock = mock_colima_dir / "docker.sock"
+    symlink_sock.symlink_to(untrusted_target)
+
+    try:
+        monkeypatch.setattr(Path, "home", lambda: mock_home)
+        monkeypatch.setenv("DOCKER_HOST", f"unix://{symlink_sock}")
+        # Even though symlink is in .colima, it resolves to /tmp/target.sock -> REJECTED!
+        assert IsolatedExecutionProvider.resolve_docker_endpoint() is None
+    finally:
+        s.close()
+        if symlink_sock.is_symlink():
+            symlink_sock.unlink()
+        if untrusted_target.exists():
+            untrusted_target.unlink()
 
 def test_docker_concurrent_task_container_naming(tmp_path):
     """Verifies deterministic, unique, collision-resistant container naming."""

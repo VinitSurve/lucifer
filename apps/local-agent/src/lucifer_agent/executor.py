@@ -26,37 +26,87 @@ class IsolatedExecutionProvider:
     """
 
     @classmethod
+    def _is_trusted_socket_path(cls, path: Path) -> bool:
+        """Validates that a Unix domain socket path belongs to a trusted, secure location.
+        Approved locations:
+        1. System Docker socket: /var/run/docker.sock or /run/docker.sock.
+        2. Colima user socket: ~/.colima/<profile>/*.sock.
+        3. Docker Desktop user socket: ~/.docker/run/*.sock.
+        Rejects arbitrary user paths, world-writable directories, symlink escapes, or TCP endpoints.
+        """
+        try:
+            st = path.stat()
+            if not stat.S_ISSOCK(st.st_mode):
+                return False
+
+            resolved = path.resolve()
+            rst = resolved.stat()
+            if not stat.S_ISSOCK(rst.st_mode):
+                return False
+
+            # Verify ownership: must be owned by root (UID 0) or current user
+            current_uid = os.getuid()
+            if rst.st_uid not in (0, current_uid):
+                return False
+
+            # Check approved locations
+            system_sockets = {
+                Path("/var/run/docker.sock").resolve(),
+                Path("/run/docker.sock").resolve()
+            }
+            if resolved in system_sockets:
+                return True
+
+            home_resolved = Path.home().resolve()
+            colima_root = home_resolved / ".colima"
+            docker_run_root = home_resolved / ".docker" / "run"
+
+            if colima_root in resolved.parents and resolved.name.endswith(".sock"):
+                return True
+
+            if docker_run_root in resolved.parents and resolved.name.endswith(".sock"):
+                return True
+
+            return False
+        except Exception:
+            return False
+
+    @classmethod
     def resolve_docker_endpoint(cls) -> Optional[str]:
         """Resolves trusted Docker endpoint without relying on arbitrary user HOME environment.
-        Checks:
-        1. DOCKER_HOST in os.environ (strictly validated for safe unix socket or tcp schema).
-        2. Known trusted Unix sockets (/var/run/docker.sock, ~/.colima/default/docker.sock, ~/.docker/run/docker.sock).
+        Strict policy:
+        1. TCP endpoints are strictly rejected by security policy (DEF-01).
+        2. DOCKER_HOST unix:// sockets must satisfy _is_trusted_socket_path (DEF-02).
+        3. Probes standard candidate sockets in order of precedence:
+           - ~/.colima/default/docker.sock
+           - /var/run/docker.sock
+           - /run/docker.sock
+           - ~/.docker/run/docker.sock
         Returns validated endpoint string (e.g. 'unix:///path/to/docker.sock') or None if unavailable.
         """
         raw_env_host = os.environ.get("DOCKER_HOST", "").strip()
         if raw_env_host:
+            # Strictly reject plaintext/remote TCP endpoints by default policy (DEF-01)
+            if raw_env_host.startswith("tcp://") or raw_env_host.startswith("http://") or raw_env_host.startswith("https://"):
+                return None
+
             if raw_env_host.startswith("unix://"):
                 sock_path = Path(raw_env_host[len("unix://"):])
-                try:
-                    if sock_path.is_socket():
-                        return f"unix://{sock_path.resolve()}"
-                except Exception:
-                    pass
-            elif re.match(r"^tcp://[a-zA-Z0-9_.-]+:[0-9]+$", raw_env_host):
-                return raw_env_host
+                if cls._is_trusted_socket_path(sock_path):
+                    return f"unix://{sock_path.resolve()}"
+                # If an untrusted unix socket path is specified, fail closed
+                return None
 
         # Probe trusted candidate socket paths in order
         candidates = [
-            Path("/var/run/docker.sock"),
             Path.home() / ".colima" / "default" / "docker.sock",
+            Path("/var/run/docker.sock"),
+            Path("/run/docker.sock"),
             Path.home() / ".docker" / "run" / "docker.sock"
         ]
         for candidate in candidates:
-            try:
-                if candidate.is_socket():
-                    return f"unix://{candidate.resolve()}"
-            except Exception:
-                continue
+            if cls._is_trusted_socket_path(candidate):
+                return f"unix://{candidate.resolve()}"
 
         return None
 
