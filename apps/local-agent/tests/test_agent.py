@@ -480,12 +480,13 @@ def test_docker_pids_limit_in_command(tmp_path, monkeypatch):
     assert cmd[cmd.index("--network") + 1] == "none"
 
 @pytest.mark.skipif(not shutil.which("docker"), reason="Docker CLI not installed")
-def test_docker_live_timeout_forced_cleanup():
+def test_docker_live_timeout_forced_cleanup(tmp_path):
     """Live verification: sleep command exceeding timeout is actively stopped and removed."""
     if not IsolatedExecutionProvider.is_isolation_available():
         pytest.skip("Docker daemon/Colima not responding")
 
-    workspace = "/Users/vinit/tmp/lucifer-staging-workspace"
+    workspace = str(tmp_path / "staging-workspace")
+    Path(workspace).mkdir(parents=True, exist_ok=True)
     test_task_id = f"timeout-{uuid.uuid4().hex[:6]}"
 
     res = IsolatedExecutionProvider.execute_in_container(
